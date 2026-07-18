@@ -262,21 +262,16 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       const epStr = queued.episodeNum.toString().padStart(2, '0');
       const videoName = `${queued.slug}_S${queued.season}E${epStr}`;
 
-      // For HLS, pass our server's stream-video proxy URL so CF gets a clean MP4 stream.
-      // For MP4, pass the CDN URL directly — CF will add the Referer header server-side.
-      const uploadVideoUrl =
-        videoType === 'hls'
-          ? `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1&videoType=hls`
-          : videoUrl;
+      // Always route through our stream-video proxy so CF can fetch without
+      // needing special Referer headers (HLS assembles segments; MP4 proxies).
+      const uploadVideoUrl = `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1&videoType=${videoType}`;
 
       const uploadRes = await fetch(`${getApiBase()}/cf-upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           videoUrl: uploadVideoUrl,
-          videoType,
           name: videoName,
-          subtitleUrl,
         }),
       });
 

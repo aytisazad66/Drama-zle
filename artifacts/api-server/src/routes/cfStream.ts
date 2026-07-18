@@ -5,21 +5,19 @@ const router = Router();
 /**
  * POST /api/drama/cf-upload
  *
- * Fetches the video from the source URL and pipes it directly to
- * Cloudflare Stream's direct-upload endpoint.  This avoids the
- * Content-Length / range-request requirement of CF's copy-from-URL API.
+ * Tells Cloudflare Stream to fetch the video from our stream-video proxy URL.
+ * CF downloads it themselves — no body streaming needed.
  */
 router.post('/cf-upload', async (req, res) => {
-  const { videoUrl, videoType, name } = req.body as {
+  const { videoUrl, name } = req.body as {
     videoUrl?: string;
-    videoType?: string;
     name?: string;
   };
 
-  if (!videoUrl || !videoType || !name) {
+  if (!videoUrl || !name) {
     return res
       .status(400)
-      .json({ error: 'Geçersiz istek: videoUrl, videoType ve name zorunlu' });
+      .json({ error: 'Geçersiz istek: videoUrl ve name zorunlu' });
   }
 
   const accountId = process.env.CF_ACCOUNT_ID;
@@ -31,51 +29,21 @@ router.post('/cf-upload', async (req, res) => {
       .json({ error: 'Cloudflare kimlik bilgileri yapılandırılmamış' });
   }
 
-  // ── Step 1: fetch the source video ──────────────────────────────────────
-  // For HLS videoUrl is already our /stream-video proxy (returns assembled MP4).
-  // For MP4 videoUrl is the CDN link — send Referer so the CDN accepts it.
-  const sourceHeaders: Record<string, string> =
-    videoType === 'mp4'
-      ? {
-          Referer: 'https://dramadizilerim.com/',
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36',
-        }
-      : {};
-
-  let sourceRes: Response;
-  try {
-    sourceRes = await fetch(videoUrl, { headers: sourceHeaders });
-  } catch (err) {
-    return res
-      .status(502)
-      .json({ error: 'Video kaynağına bağlanılamadı', details: String(err) });
-  }
-
-  if (!sourceRes.ok || !sourceRes.body) {
-    return res.status(502).json({
-      error: 'Video kaynağından veri alınamadı',
-      details: `HTTP ${sourceRes.status}`,
-    });
-  }
-
-  // ── Step 2: pipe directly to CF Stream direct-upload ────────────────────
-  // POST /accounts/{id}/stream  — accepts chunked body, no Content-Length needed.
-  const nameB64 = Buffer.from(name).toString('base64');
-
+  // Use CF Stream copy-from-URL: CF fetches the video from our proxy server.
+  // Our /stream-video endpoint handles both HLS assembly and MP4 proxying with
+  // the correct Referer headers — CF just sees a plain video stream.
   const cfRes = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream`,
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/copy`,
     {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
-        'Content-Type': 'video/mp4',
-        'Upload-Metadata': `name ${nameB64},requiresignedurls`,
-        // Tell CF what we're sending is an MP4 (even from HLS — our proxy assembles it)
+        'Content-Type': 'application/json',
       },
-      body: sourceRes.body,
-      // @ts-ignore — Node 18+ fetch needs duplex for streaming request body
-      duplex: 'half',
+      body: JSON.stringify({
+        url: videoUrl,
+        meta: { name },
+      }),
     },
   );
 
