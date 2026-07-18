@@ -2,20 +2,14 @@ import React, {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useRef,
   useState,
 } from 'react';
-import { Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system/legacy';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const SAVE_FOLDER_KEY = 'save_folder_uri';
 
 export type DownloadStatus =
   | 'queued'
   | 'extracting'
-  | 'downloading'
+  | 'uploading'
   | 'done'
   | 'error';
 
@@ -28,18 +22,19 @@ export interface DownloadItem {
   status: DownloadStatus;
   bytesWritten: number;
   totalBytes: number;
-  filePath?: string;
-  subtitlePath?: string;
   error?: string;
   token: string;
   tokenType: string;
   episodeUrl?: string;
   addedAt: number;
+  /** Cloudflare Stream video UID — set when upload is complete */
+  cfStreamUid?: string;
+  /** Cloudflare Stream HLS playback URL */
+  cfStreamUrl?: string;
 }
 
 interface DownloadContextValue {
   downloads: DownloadItem[];
-  saveFolderUri: string | null;
   addEpisodes: (episodes: {
     num: number;
     token: string;
@@ -52,8 +47,6 @@ interface DownloadContextValue {
   cancelDownload: (id: string) => void;
   clearCompleted: () => void;
   clearAll: () => void;
-  selectSaveFolder: () => Promise<boolean>;
-  clearSaveFolder: () => Promise<void>;
 }
 
 const DownloadContext = createContext<DownloadContextValue | null>(null);
@@ -117,39 +110,9 @@ async function fetchVideoUrlWithRetry(
 
 export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
-  const [saveFolderUri, setSaveFolderUri] = useState<string | null>(null);
-  const saveFolderRef = useRef<string | null>(null);
-
-  // Load persisted folder URI on mount
-  useEffect(() => {
-    AsyncStorage.getItem(SAVE_FOLDER_KEY).then((v) => {
-      if (v) { setSaveFolderUri(v); saveFolderRef.current = v; }
-    });
-  }, []);
-
-  const selectSaveFolder = useCallback(async (): Promise<boolean> => {
-    if (Platform.OS !== 'android') return false;
-    try {
-      const result = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-      if (result.granted) {
-        await AsyncStorage.setItem(SAVE_FOLDER_KEY, result.directoryUri);
-        setSaveFolderUri(result.directoryUri);
-        saveFolderRef.current = result.directoryUri;
-        return true;
-      }
-    } catch {}
-    return false;
-  }, []);
-
-  const clearSaveFolder = useCallback(async () => {
-    await AsyncStorage.removeItem(SAVE_FOLDER_KEY);
-    setSaveFolderUri(null);
-    saveFolderRef.current = null;
-  }, []);
 
   const isProcessingRef = useRef(false);
   const cancelledRef = useRef<Set<string>>(new Set());
-  const activeResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
   const downloadsRef = useRef<DownloadItem[]>([]);
   downloadsRef.current = downloads;
 
@@ -293,125 +256,51 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Step 2: Download video
-      updateItem(queued.id, { status: 'downloading' });
+      // Step 2: Upload to Cloudflare Stream
+      updateItem(queued.id, { status: 'uploading' });
 
       const epStr = queued.episodeNum.toString().padStart(2, '0');
-      const fileName = `${queued.slug}_S${queued.season}E${epStr}.mp4`;
+      const videoName = `${queued.slug}_S${queued.season}E${epStr}`;
 
-      // Save to documentDirectory/drama-downloads/ — accessible via Files app on iOS,
-      // and via any file manager on Android.
-      const saveDir = `${FileSystem.documentDirectory}drama-downloads/`;
-      await FileSystem.makeDirectoryAsync(saveDir, { intermediates: true });
-      const videoPath = saveDir + fileName;
+      // For HLS, pass our server's stream-video proxy URL so CF gets a clean MP4 stream.
+      // For MP4, pass the CDN URL directly — CF will add the Referer header server-side.
+      const uploadVideoUrl =
+        videoType === 'hls'
+          ? `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1&videoType=hls`
+          : videoUrl;
 
-      // For direct MP4, download straight from CDN on the phone (faster, no proxy delay).
-      // For HLS, stream through the server which assembles segments.
-      const downloadFromUrl = videoType === 'mp4'
-        ? videoUrl
-        : `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1&videoType=hls`;
+      const uploadRes = await fetch(`${getApiBase()}/cf-upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videoUrl: uploadVideoUrl,
+          videoType,
+          name: videoName,
+          subtitleUrl,
+        }),
+      });
 
-      const downloadHeaders: Record<string, string> = videoType === 'mp4'
-        ? {
-            'Referer': 'https://dramadizilerim.com/',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36',
-          }
-        : {};
-
-      const streamUrl = downloadFromUrl;
-
-      const resumable = FileSystem.createDownloadResumable(
-        streamUrl,
-        videoPath,
-        { headers: downloadHeaders },
-        (progress) => {
-          updateItem(queued.id, {
-            bytesWritten: progress.totalBytesWritten,
-            totalBytes:
-              progress.totalBytesExpectedToWrite > 0
-                ? progress.totalBytesExpectedToWrite
-                : 0,
-          });
-        }
-      );
-
-      activeResumableRef.current = resumable;
-      const result = await resumable.downloadAsync();
-      activeResumableRef.current = null;
-
-      if (cancelledRef.current.has(queued.id)) {
-        try { await FileSystem.deleteAsync(videoPath, { idempotent: true }); } catch {}
-        updateItem(queued.id, { status: 'error', error: 'İptal edildi' });
-        isProcessingRef.current = false;
-        setTimeout(processNext, 100);
-        return;
-      }
-
-      if (!result || result.status !== 200) {
-        throw new Error('İndirme başarısız oldu');
-      }
-
-      // Step 3: Download subtitle to the same folder as the video
-      let subtitlePath: string | undefined;
-      if (subtitleUrl) {
+      if (!uploadRes.ok) {
+        let errMsg = 'Cloudflare yükleme başarısız';
         try {
-          const subFileName = fileName.replace('.mp4', '.srt');
-          subtitlePath = saveDir + subFileName;
-          const subUrl = `${getApiBase()}/subtitle?url=${encodeURIComponent(subtitleUrl)}`;
-          await FileSystem.downloadAsync(subUrl, subtitlePath);
-        } catch {
-          // Subtitle failure is non-fatal
-          subtitlePath = undefined;
-        }
+          const errData = await uploadRes.json() as { error?: string };
+          if (errData.error) errMsg = errData.error;
+        } catch {}
+        throw new Error(errMsg);
       }
 
-      // Step 4: Auto-copy to SAF save folder (indirilendramalar etc.) if configured
-      if (Platform.OS === 'android' && saveFolderRef.current) {
-        try {
-          const destUri = await FileSystem.StorageAccessFramework.createFileAsync(
-            saveFolderRef.current,
-            fileName,
-            'video/mp4',
-          );
-          const content = await FileSystem.readAsStringAsync(result.uri, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          await FileSystem.StorageAccessFramework.writeAsStringAsync(
-            destUri,
-            content,
-            { encoding: FileSystem.EncodingType.Base64 },
-          );
-          // Also copy subtitle if present
-          if (subtitlePath) {
-            try {
-              const subName = fileName.replace('.mp4', '.srt');
-              const subDest = await FileSystem.StorageAccessFramework.createFileAsync(
-                saveFolderRef.current,
-                subName,
-                'application/x-subrip',
-              );
-              const subContent = await FileSystem.readAsStringAsync(subtitlePath, {
-                encoding: FileSystem.EncodingType.Base64,
-              });
-              await FileSystem.StorageAccessFramework.writeAsStringAsync(
-                subDest,
-                subContent,
-                { encoding: FileSystem.EncodingType.Base64 },
-              );
-            } catch {}
-          }
-        } catch {
-          // Copy failure is non-fatal — file is still in documentDirectory
-        }
-      }
+      const uploadData = await uploadRes.json() as {
+        uid: string;
+        hlsUrl: string | null;
+        state: string;
+      };
 
       updateItem(queued.id, {
         status: 'done',
-        filePath: result.uri,
-        subtitlePath,
+        cfStreamUid: uploadData.uid,
+        cfStreamUrl: uploadData.hlsUrl ?? undefined,
       });
     } catch (err) {
-      activeResumableRef.current = null;
       const message =
         err instanceof Error ? err.message : 'Bilinmeyen hata';
       updateItem(queued.id, { status: 'error', error: message });
@@ -472,15 +361,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
   );
 
   const cancelDownload = useCallback(
-    async (id: string) => {
+    (id: string) => {
       cancelledRef.current.add(id);
-      const item = downloadsRef.current.find((d) => d.id === id);
-      if (item?.status === 'downloading' && activeResumableRef.current) {
-        try {
-          await activeResumableRef.current.cancelAsync();
-          activeResumableRef.current = null;
-        } catch {}
-      }
       updateItem(id, { status: 'error', error: 'İptal edildi' });
     },
     [updateItem]
@@ -498,13 +380,10 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     <DownloadContext.Provider
       value={{
         downloads,
-        saveFolderUri,
         addEpisodes,
         cancelDownload,
         clearCompleted,
         clearAll,
-        selectSaveFolder,
-        clearSaveFolder,
       }}
     >
       {children}

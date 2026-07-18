@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
 import {
-  Alert,
   FlatList,
   Platform,
   StyleSheet,
@@ -17,24 +16,7 @@ import DownloadItemCard from '@/components/DownloadItem';
 export default function DownloadsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { downloads, cancelDownload, clearCompleted, clearAll, saveFolderUri, selectSaveFolder, clearSaveFolder } = useDownloads();
-
-  const handleFolderPress = async () => {
-    if (Platform.OS !== 'android') return;
-    if (saveFolderUri) {
-      Alert.alert(
-        'Kayıt Klasörü',
-        'Kayıt klasörünü değiştirmek veya kaldırmak ister misiniz?',
-        [
-          { text: 'İptal', style: 'cancel' },
-          { text: 'Değiştir', onPress: () => selectSaveFolder() },
-          { text: 'Kaldır', style: 'destructive', onPress: () => clearSaveFolder() },
-        ],
-      );
-    } else {
-      await selectSaveFolder();
-    }
-  };
+  const { downloads, cancelDownload, clearCompleted, clearAll } = useDownloads();
 
   const sorted = useMemo(
     () => [...downloads].sort((a, b) => a.addedAt - b.addedAt),
@@ -42,7 +24,10 @@ export default function DownloadsScreen() {
   );
 
   const active = sorted.filter(
-    (d) => d.status === 'queued' || d.status === 'downloading' || d.status === 'extracting'
+    (d) =>
+      d.status === 'queued' ||
+      d.status === 'uploading' ||
+      d.status === 'extracting'
   );
   const done = sorted.filter((d) => d.status === 'done');
   const failed = sorted.filter((d) => d.status === 'error');
@@ -50,40 +35,21 @@ export default function DownloadsScreen() {
   const topPad = Platform.OS === 'web' ? 67 : insets.top;
   const bottomPad = Platform.OS === 'web' ? 34 : insets.bottom;
 
-  // Folder banner shown on Android at top of both states
-  const folderBanner = Platform.OS === 'android' ? (
-    <TouchableOpacity
-      onPress={handleFolderPress}
-      style={[
-        styles.folderBanner,
-        { backgroundColor: saveFolderUri ? colors.success + '22' : colors.card, borderColor: saveFolderUri ? colors.success : colors.border },
-      ]}
-      activeOpacity={0.7}
-    >
-      <Feather name="folder" size={16} color={saveFolderUri ? colors.success : colors.mutedForeground} />
-      <Text style={[styles.folderBannerText, { color: saveFolderUri ? colors.success : colors.mutedForeground }]} numberOfLines={1}>
-        {saveFolderUri ? '✓ Klasör seçildi — videolar oraya kopyalanır' : 'Kayıt klasörü seç (örn. indirilendramalar)'}
-      </Text>
-      <Feather name="chevron-right" size={14} color={saveFolderUri ? colors.success : colors.mutedForeground} />
-    </TouchableOpacity>
-  ) : null;
-
   if (downloads.length === 0) {
     return (
       <View style={[styles.root, { backgroundColor: colors.background }]}>
         <View style={[styles.header, { paddingTop: topPad + 16 }]}>
           <Text style={[styles.headerTitle, { color: colors.foreground }]}>
-            İndirmeler
+            Yüklemeler
           </Text>
         </View>
-        {folderBanner}
         <View style={styles.emptyState}>
-          <Feather name="download" size={48} color={colors.mutedForeground} />
+          <Feather name="upload-cloud" size={48} color={colors.mutedForeground} />
           <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-            Henüz indirme yok
+            Henüz yükleme yok
           </Text>
           <Text style={[styles.emptySub, { color: colors.mutedForeground }]}>
-            Ana sayfadan bir dizi URL'i girerek{'\n'}bölümleri indirmeye başla.
+            Ana sayfadan bir dizi URL'i girerek{'\n'}bölümleri Cloudflare Stream'e yükle.
           </Text>
         </View>
       </View>
@@ -95,7 +61,7 @@ export default function DownloadsScreen() {
       {/* Header */}
       <View style={[styles.header, { paddingTop: topPad + 16 }]}>
         <Text style={[styles.headerTitle, { color: colors.foreground }]}>
-          İndirmeler
+          Yüklemeler
         </Text>
         <View style={styles.headerActions}>
           {done.length > 0 && (
@@ -110,8 +76,6 @@ export default function DownloadsScreen() {
           )}
         </View>
       </View>
-
-      {folderBanner}
 
       {/* Stats bar */}
       <View style={[styles.statsBar, { backgroundColor: colors.card }]}>
@@ -139,7 +103,7 @@ export default function DownloadsScreen() {
             <View style={styles.sectionLabel}>
               <View style={[styles.dot, { backgroundColor: colors.primary }]} />
               <Text style={[styles.sectionLabelText, { color: colors.mutedForeground }]}>
-                Aktif indirmeler
+                Aktif yüklemeler
               </Text>
             </View>
           ) : null
@@ -256,21 +220,5 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     textAlign: 'center',
     lineHeight: 20,
-  },
-  folderBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  folderBannerText: {
-    flex: 1,
-    fontSize: 13,
-    fontFamily: 'Inter_500Medium',
   },
 });

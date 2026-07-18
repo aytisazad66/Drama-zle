@@ -1,21 +1,15 @@
 import React from 'react';
 import {
+  Linking,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  Platform,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 
 import { useColors } from '@/hooks/useColors';
 import type { DownloadItem as DownloadItemType } from '@/context/DownloadContext';
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 interface Props {
   item: DownloadItemType;
@@ -28,7 +22,7 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
   const statusColor = {
     queued: colors.mutedForeground,
     extracting: colors.warning,
-    downloading: colors.primary,
+    uploading: colors.primary,
     done: colors.success,
     error: colors.destructive,
   }[item.status];
@@ -36,30 +30,25 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
   const statusLabel = {
     queued: 'Kuyrukta',
     extracting: 'Link çekiliyor...',
-    downloading: 'İndiriliyor...',
-    done: 'Tamamlandı ✓',
+    uploading: 'Stream\'e yükleniyor...',
+    done: 'Stream\'e yüklendi ✓',
     error: item.error ?? 'Hata',
   }[item.status];
 
   const progressPercent =
-    item.status === 'downloading' && item.totalBytes > 0
-      ? Math.round((item.bytesWritten / item.totalBytes) * 100)
+    item.status === 'uploading'
+      ? 60  // indeterminate — show partial fill
       : item.status === 'done'
       ? 100
       : 0;
 
-  const handleShare = async () => {
-    if (!item.filePath) return;
-    try {
-      const Sharing = await import('expo-sharing');
-      const canShare = await Sharing.isAvailableAsync();
-      if (canShare) {
-        await Sharing.shareAsync(item.filePath, {
-          UTI: 'public.movie',
-          mimeType: 'video/mp4',
-        });
-      }
-    } catch {}
+  const handleWatch = () => {
+    if (item.cfStreamUid) {
+      // Opens CF Stream's hosted player in the device browser
+      Linking.openURL(`https://watch.cloudflarestream.com/${item.cfStreamUid}`);
+    } else if (item.cfStreamUrl) {
+      Linking.openURL(item.cfStreamUrl);
+    }
   };
 
   return (
@@ -71,9 +60,7 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
     >
       <View style={styles.header}>
         <View style={styles.titleRow}>
-          <View
-            style={[styles.epBadge, { backgroundColor: colors.secondary }]}
-          >
+          <View style={[styles.epBadge, { backgroundColor: colors.secondary }]}>
             <Text style={[styles.epText, { color: colors.primary }]}>
               E{item.episodeNum}
             </Text>
@@ -92,7 +79,9 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
         </View>
 
         <View style={styles.actions}>
-          {(item.status === 'queued' || item.status === 'downloading' || item.status === 'extracting') && (
+          {(item.status === 'queued' ||
+            item.status === 'uploading' ||
+            item.status === 'extracting') && (
             <TouchableOpacity onPress={onCancel} style={styles.iconBtn}>
               <Feather name="x" size={18} color={colors.mutedForeground} />
             </TouchableOpacity>
@@ -107,7 +96,8 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
             styles.progressFill,
             {
               width: `${progressPercent}%` as any,
-              backgroundColor: item.status === 'error' ? colors.destructive : statusColor,
+              backgroundColor:
+                item.status === 'error' ? colors.destructive : statusColor,
             },
           ]}
         />
@@ -118,28 +108,22 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
         <Text style={[styles.statusText, { color: statusColor }]}>
           {statusLabel}
         </Text>
-        {item.status === 'downloading' && (
-          <Text style={[styles.bytesText, { color: colors.mutedForeground }]}>
-            {formatBytes(item.bytesWritten)}
-            {item.totalBytes > 0 ? ` / ${formatBytes(item.totalBytes)}` : ''}
-          </Text>
-        )}
-        {item.status === 'done' && item.subtitlePath && (
-          <Text style={[styles.bytesText, { color: colors.success }]}>
-            + Altyazı
+        {item.status === 'done' && item.cfStreamUid && (
+          <Text style={[styles.uidText, { color: colors.mutedForeground }]}>
+            {item.cfStreamUid.slice(0, 8)}…
           </Text>
         )}
       </View>
 
-      {/* Save button — shown when download is complete */}
-      {item.status === 'done' && Platform.OS !== 'web' && (
+      {/* Watch button — shown when upload is complete */}
+      {item.status === 'done' && (item.cfStreamUid || item.cfStreamUrl) && (
         <TouchableOpacity
-          onPress={handleShare}
-          style={[styles.saveBtn, { backgroundColor: colors.primary }]}
+          onPress={handleWatch}
+          style={[styles.watchBtn, { backgroundColor: colors.primary }]}
           activeOpacity={0.8}
         >
-          <Feather name="save" size={15} color="#fff" />
-          <Text style={styles.saveBtnText}>Cihaza Kaydet / Paylaş</Text>
+          <Feather name="play-circle" size={15} color="#fff" />
+          <Text style={styles.watchBtnText}>Stream'de İzle</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -213,11 +197,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter_500Medium',
   },
-  bytesText: {
-    fontSize: 12,
+  uidText: {
+    fontSize: 11,
     fontFamily: 'Inter_400Regular',
   },
-  saveBtn: {
+  watchBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -227,7 +211,7 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 14,
   },
-  saveBtnText: {
+  watchBtnText: {
     color: '#fff',
     fontSize: 13,
     fontFamily: 'Inter_600SemiBold',
