@@ -236,7 +236,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       // For HLS, stream through the server which assembles segments.
       const downloadFromUrl = videoType === 'mp4'
         ? videoUrl
-        : `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1`;
+        : `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1&videoType=hls`;
 
       const downloadHeaders: Record<string, string> = videoType === 'mp4'
         ? {

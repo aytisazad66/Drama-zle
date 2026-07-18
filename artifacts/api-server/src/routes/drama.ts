@@ -280,10 +280,11 @@ router.get("/segments", async (req: Request, res: Response) => {
   }
 });
 
-// --- GET /drama/stream-video?m3u8Url=URL&quality=0 ---
-// Streams video: handles both HLS (m3u8 segments) and direct MP4 proxy
+// --- GET /drama/stream-video?m3u8Url=URL&quality=0&videoType=hls|mp4 ---
+// Streams video: handles both HLS (m3u8 segments) and direct MP4 proxy.
+// videoType param overrides URL-based detection (needed for hls_proxy.php URLs).
 router.get("/stream-video", async (req: Request, res: Response) => {
-  const { m3u8Url, quality } = req.query;
+  const { m3u8Url, quality, videoType } = req.query;
   if (!m3u8Url || typeof m3u8Url !== "string") {
     res.status(400).json({ error: "m3u8Url gerekli" });
     return;
@@ -291,9 +292,12 @@ router.get("/stream-video", async (req: Request, res: Response) => {
 
   const qualityIndex = parseInt((quality as string) ?? "1") || 1;
 
+  // Determine mode: prefer explicit videoType param; fall back to URL heuristic
+  const isHls = videoType === "hls" || m3u8Url.includes(".m3u8");
+
   try {
-    // Direct MP4 — proxy the response straight through
-    if (!m3u8Url.includes(".m3u8")) {
+    if (!isHls) {
+      // Direct MP4 — proxy the response straight through
       const response = await fetch(m3u8Url, {
         headers: {
           ...BASE_HEADERS,
@@ -318,18 +322,29 @@ router.get("/stream-video", async (req: Request, res: Response) => {
       return;
     }
 
-    // HLS — parse master m3u8 and stream concatenated segments
-    const masterM3u8 = await fetchText(m3u8Url);
-    const variants = parseMasterM3u8(masterM3u8);
+    // HLS — fetch the playlist and determine if it is a master or variant m3u8
+    const playlistText = await fetchText(m3u8Url);
+    const variants = parseMasterM3u8(playlistText);
 
-    if (variants.length === 0) {
+    let variantPlaylistText: string;
+    if (variants.length > 0) {
+      // Master m3u8: pick the requested quality variant
+      const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
+      variantPlaylistText = await fetchText(selected.url);
+    } else if (playlistText.includes("#EXTINF:")) {
+      // Already a variant (media) m3u8 — use it directly
+      variantPlaylistText = playlistText;
+    } else {
       res.status(404).json({ error: "Video kalitesi bulunamadı" });
       return;
     }
 
-    const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
-    const variantM3u8 = await fetchText(selected.url);
-    const { initUrl, segments } = parseVariantM3u8(variantM3u8);
+    const { initUrl, segments } = parseVariantM3u8(variantPlaylistText);
+
+    if (segments.length === 0) {
+      res.status(404).json({ error: "Video segmentleri bulunamadı" });
+      return;
+    }
 
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Transfer-Encoding", "chunked");
