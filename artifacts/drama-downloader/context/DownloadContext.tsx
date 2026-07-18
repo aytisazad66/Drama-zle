@@ -70,6 +70,51 @@ function makeId(): string {
   return Date.now().toString() + Math.random().toString(36).substring(2, 9);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Fetch the video URL via the server proxy, retrying up to maxRetries times
+ *  with exponential back-off to survive temporary rate-limiting. */
+async function fetchVideoUrlWithRetry(
+  apiBase: string,
+  token: string,
+  type: string,
+  episodeUrl?: string,
+  maxRetries = 3,
+): Promise<{ videoUrl: string | null; videoType: 'hls' | 'mp4'; subtitleUrl: string | null }> {
+  const delays = [5000, 15000, 30000]; // ms between attempts
+  let lastResult = { videoUrl: null as string | null, videoType: 'mp4' as 'hls' | 'mp4', subtitleUrl: null as string | null };
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      await sleep(delays[attempt - 1] ?? 30000);
+    }
+    try {
+      const serverUrl = `${apiBase}/embed?token=${encodeURIComponent(token)}&tokenType=${encodeURIComponent(type)}${episodeUrl ? `&episodeUrl=${encodeURIComponent(episodeUrl)}` : ''}`;
+      const serverRes = await fetch(serverUrl);
+      if (serverRes.ok) {
+        const data = await serverRes.json() as {
+          videoUrl?: string; videoType?: 'hls' | 'mp4';
+          subtitleUrl?: string | null; m3u8Url?: string;
+        };
+        const url = data.videoUrl ?? data.m3u8Url ?? null;
+        if (url) {
+          return {
+            videoUrl: url,
+            videoType: data.videoType ?? (url.includes('.m3u8') ? 'hls' : 'mp4'),
+            subtitleUrl: data.subtitleUrl ?? null,
+          };
+        }
+      }
+    } catch {
+      // retry
+    }
+    lastResult = { videoUrl: null, videoType: 'mp4', subtitleUrl: null };
+  }
+  return lastResult;
+}
+
 export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [saveFolderUri, setSaveFolderUri] = useState<string | null>(null);
@@ -225,26 +270,16 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (!videoUrl) {
-        // On-device fetch failed or was blocked — try via server proxy
-        try {
-          const apiBase = getApiBase();
-          const serverUrl = `${apiBase}/embed?token=${encodeURIComponent(queued.token)}&tokenType=${encodeURIComponent(type)}${queued.episodeUrl ? `&episodeUrl=${encodeURIComponent(queued.episodeUrl)}` : ''}`;
-          const serverRes = await fetch(serverUrl);
-          if (serverRes.ok) {
-            const data = await serverRes.json() as {
-              videoUrl?: string;
-              videoType?: 'hls' | 'mp4';
-              subtitleUrl?: string | null;
-              // legacy field name kept for safety
-              m3u8Url?: string;
-            };
-            videoUrl = data.videoUrl ?? data.m3u8Url ?? null;
-            videoType = data.videoType ?? (videoUrl?.includes('.m3u8') ? 'hls' : 'mp4');
-            subtitleUrl = data.subtitleUrl ?? null;
-          }
-        } catch {
-          // fall through — will throw below
-        }
+        // On-device fetch failed or was blocked — try via server proxy with retry
+        const fetched = await fetchVideoUrlWithRetry(
+          getApiBase(),
+          queued.token,
+          type,
+          queued.episodeUrl,
+        );
+        videoUrl = fetched.videoUrl;
+        videoType = fetched.videoType;
+        subtitleUrl = fetched.subtitleUrl;
       }
 
       if (!videoUrl) {
@@ -383,7 +418,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     }
 
     isProcessingRef.current = false;
-    setTimeout(processNext, 200);
+    // 4-second cooldown between episodes to avoid rate-limiting by the video server
+    setTimeout(processNext, 4000);
   }, [updateItem]);
 
   const addEpisodes = useCallback(
