@@ -101,10 +101,12 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       updateItem(queued.id, { status: 'extracting' });
 
       const type = queued.tokenType === 'token' ? 'token' : 'ct';
+      // For ct type, queued.token is now the full query string (ct=...&iv=...&video_id=...&episode=...&_t=...&logo=...)
+      // For token type, queued.token is just the raw token value
       const embedPageUrl =
         type === 'token'
           ? `https://dramadizilerim.com/embed.php?token=${encodeURIComponent(queued.token)}&v=2`
-          : `https://dramadizilerim.com/embed.php?ct=${encodeURIComponent(queued.token)}`;
+          : `https://dramadizilerim.com/embed.php?${queued.token}`;
 
       const MOBILE_UA =
         'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36';
@@ -164,15 +166,16 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       let subtitleUrl: string | null = null;
 
       if (embedHtml) {
-        // Parse from on-device HTML
+        // Parse from on-device HTML — supports both HLS (m3u8) and direct MP4
         const sourceMatch =
-          embedHtml.match(/let source\s*=\s*"([^"]+\.m3u8[^"]*)"/) ??
+          embedHtml.match(/let source\s*=\s*"(https?:\/\/[^"]{20,})"/) ??
+          embedHtml.match(/<source[^>]+src="(https?:\/\/[^"]{20,})"/) ??
           embedHtml.match(/source\s*=\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
-          embedHtml.match(/<source[^>]+src="(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
           embedHtml.match(/"(https:\/\/dizi\.dramadizilerim\.com\/\?url=[^"]+\.m3u8[^"]*)"/);
         m3u8Url = sourceMatch?.[1] ?? null;
 
-        const srtCommentMatch = embedHtml.match(/first subtitle url:\s*(https?:\/\/\S+\.srt)/);
+        // subtitle debug comment may not have .srt extension anymore
+        const srtCommentMatch = embedHtml.match(/first subtitle url:\s*(https?:\/\/\S+)/);
         const srtProxyMatch = embedHtml.match(/(https?:\/\/dizi\.dramadizilerim\.com\/\?url=[^\s"]+\.srt)/);
         const captionTokenMatch = embedHtml.match(/window\._captionUrl\s*=\s*"([^"]+)"/);
         subtitleUrl =

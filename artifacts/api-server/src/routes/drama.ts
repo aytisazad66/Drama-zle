@@ -118,37 +118,32 @@ router.get("/extract", async (req: Request, res: Response) => {
           .trim()
       : slug;
 
-    // Collect all embed tokens in DOM order — global scan catches iframe + all lazy-player divs
-    const ctTokens: string[] = [];
+    // Collect full embed query strings in DOM order (ct=TOKEN&iv=IV&video_id=ID&episode=EP&_t=TS&logo=LOGO)
+    // We capture the full query string so the embed page gets all required params.
+    const ctQueryStrings: string[] = [];
     const seen = new Set<string>();
-    const allCtRe = /embed\.php\?ct=([^"'&\s<>\n\r]+)/g;
+    const allCtRe = /embed\.php\?([^"'<>\s\n\r]+)/g;
     let m: RegExpExecArray | null;
     while ((m = allCtRe.exec(html)) !== null) {
-      try {
-        const decoded = decodeURIComponent(m[1]!);
-        if (!seen.has(decoded)) {
-          seen.add(decoded);
-          ctTokens.push(decoded);
-        }
-      } catch {
-        if (!seen.has(m[1]!)) {
-          seen.add(m[1]!);
-          ctTokens.push(m[1]!);
-        }
+      const qs = m[1]!;
+      if (qs.startsWith("ct=") && !seen.has(qs)) {
+        seen.add(qs);
+        ctQueryStrings.push(qs);
       }
     }
 
     // Fallback: data-token="TOKEN" (embed.php?token=TOKEN&v=2)
     const dataTokens: string[] = [];
-    if (ctTokens.length === 0) {
+    if (ctQueryStrings.length === 0) {
       const tokenRe = /data-token="([^"]+)"/g;
       while ((m = tokenRe.exec(html)) !== null) {
         dataTokens.push(m[1]!);
       }
     }
 
-    const tokens = ctTokens.length > 0 ? ctTokens : dataTokens;
-    const tokenType = ctTokens.length > 0 ? "ct" : "token";
+    // token field now holds the full query string for ct type, or raw token value for token type
+    const tokens = ctQueryStrings.length > 0 ? ctQueryStrings : dataTokens;
+    const tokenType = ctQueryStrings.length > 0 ? "ct" : "token";
 
     // Count total episodes from data-epid markers
     const epIdCount = (html.match(/data-epid="[^"]+"/g) ?? []).length;
@@ -178,10 +173,12 @@ router.get("/embed", async (req: Request, res: Response) => {
 
   try {
     const type = tokenType === "token" ? "token" : "ct";
+    // For ct type, token now holds the full query string (ct=...&iv=...&video_id=...&episode=...&_t=...&logo=...)
+    // For token type, token is just the raw token value
     const embedUrl =
       type === "token"
         ? `https://dramadizilerim.com/embed.php?token=${encodeURIComponent(token)}&v=2`
-        : `https://dramadizilerim.com/embed.php?ct=${encodeURIComponent(token)}`;
+        : `https://dramadizilerim.com/embed.php?${token}`;
 
     // Step 1: visit the episode page first to obtain session cookies
     const refererPage = typeof episodeUrl === "string" && episodeUrl
@@ -198,18 +195,22 @@ router.get("/embed", async (req: Request, res: Response) => {
     // Step 2: fetch embed page with the cookies we collected
     const { html } = await fetchHtmlWithCookies(embedUrl, refererPage, cookie || undefined);
 
-    // Extract HLS m3u8 source
+    // Extract video source — supports both HLS (m3u8) and direct MP4 (cfvideo.netshort.com)
     const sourceMatch =
-      html.match(/let source\s*=\s*"([^"]+\.m3u8[^"]*)"/) ??
+      // "let source = "URL"" — primary pattern, matches both m3u8 and mp4
+      html.match(/let source\s*=\s*"(https?:\/\/[^"]{20,})"/) ??
+      // <source src="URL"> — fallback HTML tag
+      html.match(/<source[^>]+src="(https?:\/\/[^"]{20,})"/) ??
+      // Legacy patterns
       html.match(/source\s*=\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
-      html.match(/<source[^>]+src="(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
       html.match(/"(https:\/\/dizi\.dramadizilerim\.com\/\?url=[^"]+\.m3u8[^"]*)"/);
 
-    const m3u8Url = sourceMatch ? sourceMatch[1] : null;
+    const videoUrl = sourceMatch ? sourceMatch[1]! : null;
+    const videoType = videoUrl?.includes(".m3u8") ? "hls" : "mp4";
 
-    // Extract subtitle — prefer direct SRT URL from debug comment
+    // Extract subtitle — debug comment contains direct URL (may not have .srt extension)
     const srtCommentMatch = html.match(
-      /first subtitle url:\s*(https?:\/\/\S+\.srt)/,
+      /first subtitle url:\s*(https?:\/\/\S+)/,
     );
     const srtProxyMatch = html.match(
       /(https?:\/\/dizi\.dramadizilerim\.com\/\?url=[^\s"]+\.srt)/,
@@ -225,12 +226,13 @@ router.get("/embed", async (req: Request, res: Response) => {
         ? `https://dramadizilerim.com/${captionTokenMatch[1]}`
         : null);
 
-    if (!m3u8Url) {
+    if (!videoUrl) {
       res.status(404).json({ error: "Video URL bulunamadı", html: html.slice(0, 500) });
       return;
     }
 
-    res.json({ m3u8Url, subtitleUrl, hasSubtitle: !!subtitleUrl });
+    // Keep m3u8Url field for backward compat, add videoType
+    res.json({ m3u8Url: videoUrl, videoUrl, videoType, subtitleUrl, hasSubtitle: !!subtitleUrl });
   } catch (err) {
     req.log.error({ err, token }, "embed extraction failed");
     res.status(500).json({ error: "Embed sayfası okunamadı" });
@@ -279,7 +281,7 @@ router.get("/segments", async (req: Request, res: Response) => {
 });
 
 // --- GET /drama/stream-video?m3u8Url=URL&quality=0 ---
-// Streams concatenated fMP4 video: init segment + all video segments
+// Streams video: handles both HLS (m3u8 segments) and direct MP4 proxy
 router.get("/stream-video", async (req: Request, res: Response) => {
   const { m3u8Url, quality } = req.query;
   if (!m3u8Url || typeof m3u8Url !== "string") {
@@ -290,6 +292,33 @@ router.get("/stream-video", async (req: Request, res: Response) => {
   const qualityIndex = parseInt((quality as string) ?? "1") || 1;
 
   try {
+    // Direct MP4 — proxy the response straight through
+    if (!m3u8Url.includes(".m3u8")) {
+      const response = await fetch(m3u8Url, {
+        headers: {
+          ...BASE_HEADERS,
+          Referer: "https://dramadizilerim.com/",
+        },
+      });
+      if (!response.ok) {
+        res.status(502).json({ error: `Video alınamadı: HTTP ${response.status}` });
+        return;
+      }
+      res.setHeader("Content-Type", response.headers.get("content-type") ?? "video/mp4");
+      const cl = response.headers.get("content-length");
+      if (cl) res.setHeader("Content-Length", cl);
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      const reader = response.body!.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done || res.writableEnded) break;
+        res.write(Buffer.from(value));
+      }
+      res.end();
+      return;
+    }
+
+    // HLS — parse master m3u8 and stream concatenated segments
     const masterM3u8 = await fetchText(m3u8Url);
     const variants = parseMasterM3u8(masterM3u8);
 
@@ -307,7 +336,6 @@ router.get("/stream-video", async (req: Request, res: Response) => {
     res.setHeader("X-Segment-Count", String(segments.length));
     res.setHeader("Access-Control-Allow-Origin", "*");
 
-    // Download and pipe init segment first
     if (initUrl) {
       try {
         const initData = await fetchBinary(initUrl);
@@ -317,7 +345,6 @@ router.get("/stream-video", async (req: Request, res: Response) => {
       }
     }
 
-    // Download and pipe each video segment in order
     for (const segUrl of segments) {
       if (res.writableEnded) break;
       try {
