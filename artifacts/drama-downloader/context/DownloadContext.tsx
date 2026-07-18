@@ -153,7 +153,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         if (embedRes.ok) {
           const html = await embedRes.text();
           // Accept only if it actually contains a video source (not an Access Denied page)
-          if (/m3u8|source\s*=|<source/.test(html)) {
+          if (/m3u8|cfvideo|source\s*=|<source/.test(html)) {
             embedHtml = html;
           }
         }
@@ -162,7 +162,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       }
 
       // --- Attempt 2: server-side /embed (has full cookie + header handling) ---
-      let m3u8Url: string | null = null;
+      let videoUrl: string | null = null;
+      let videoType: 'hls' | 'mp4' = 'mp4';
       let subtitleUrl: string | null = null;
 
       if (embedHtml) {
@@ -172,7 +173,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           embedHtml.match(/<source[^>]+src="(https?:\/\/[^"]{20,})"/) ??
           embedHtml.match(/source\s*=\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
           embedHtml.match(/"(https:\/\/dizi\.dramadizilerim\.com\/\?url=[^"]+\.m3u8[^"]*)"/);
-        m3u8Url = sourceMatch?.[1] ?? null;
+        videoUrl = sourceMatch?.[1] ?? null;
+        videoType = videoUrl?.includes('.m3u8') ? 'hls' : 'mp4';
 
         // subtitle debug comment may not have .srt extension anymore
         const srtCommentMatch = embedHtml.match(/first subtitle url:\s*(https?:\/\/\S+)/);
@@ -184,15 +186,22 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           (captionTokenMatch ? `https://dramadizilerim.com/${captionTokenMatch[1]}` : null);
       }
 
-      if (!m3u8Url) {
+      if (!videoUrl) {
         // On-device fetch failed or was blocked — try via server proxy
         try {
           const apiBase = getApiBase();
           const serverUrl = `${apiBase}/embed?token=${encodeURIComponent(queued.token)}&tokenType=${encodeURIComponent(type)}${queued.episodeUrl ? `&episodeUrl=${encodeURIComponent(queued.episodeUrl)}` : ''}`;
           const serverRes = await fetch(serverUrl);
           if (serverRes.ok) {
-            const data = await serverRes.json() as { m3u8Url?: string; subtitleUrl?: string | null };
-            m3u8Url = data.m3u8Url ?? null;
+            const data = await serverRes.json() as {
+              videoUrl?: string;
+              videoType?: 'hls' | 'mp4';
+              subtitleUrl?: string | null;
+              // legacy field name kept for safety
+              m3u8Url?: string;
+            };
+            videoUrl = data.videoUrl ?? data.m3u8Url ?? null;
+            videoType = data.videoType ?? (videoUrl?.includes('.m3u8') ? 'hls' : 'mp4');
             subtitleUrl = data.subtitleUrl ?? null;
           }
         } catch {
@@ -200,9 +209,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      const embedData = { m3u8Url, subtitleUrl };
-
-      if (!embedData.m3u8Url) {
+      if (!videoUrl) {
         throw new Error('Video URL bulunamadı. Site erişimi engelliyor olabilir.');
       }
 
@@ -225,14 +232,25 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       await FileSystem.makeDirectoryAsync(saveDir, { intermediates: true });
       const videoPath = saveDir + fileName;
 
-      const streamUrl = `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(
-        embedData.m3u8Url
-      )}&quality=1`;
+      // For direct MP4, download straight from CDN on the phone (faster, no proxy delay).
+      // For HLS, stream through the server which assembles segments.
+      const downloadFromUrl = videoType === 'mp4'
+        ? videoUrl
+        : `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(videoUrl)}&quality=1`;
+
+      const downloadHeaders: Record<string, string> = videoType === 'mp4'
+        ? {
+            'Referer': 'https://dramadizilerim.com/',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36',
+          }
+        : {};
+
+      const streamUrl = downloadFromUrl;
 
       const resumable = FileSystem.createDownloadResumable(
         streamUrl,
         videoPath,
-        {},
+        { headers: downloadHeaders },
         (progress) => {
           updateItem(queued.id, {
             bytesWritten: progress.totalBytesWritten,
@@ -262,13 +280,11 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
       // Step 3: Download subtitle to the same folder as the video
       let subtitlePath: string | undefined;
-      if (embedData.subtitleUrl) {
+      if (subtitleUrl) {
         try {
           const subFileName = fileName.replace('.mp4', '.srt');
           subtitlePath = saveDir + subFileName;
-          const subUrl = `${getApiBase()}/subtitle?url=${encodeURIComponent(
-            embedData.subtitleUrl
-          )}`;
+          const subUrl = `${getApiBase()}/subtitle?url=${encodeURIComponent(subtitleUrl)}`;
           await FileSystem.downloadAsync(subUrl, subtitlePath);
         } catch {
           // Subtitle failure is non-fatal
