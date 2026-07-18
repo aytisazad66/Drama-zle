@@ -35,6 +35,13 @@ The `<title>` tag returns "Series Name Sezon 1 Bölüm 1 | DramaDizilerim" — s
 ## Native tab imports crash web
 `NativeTabs`, `Icon`, `Label` from `expo-router/unstable-native-tabs` and `SymbolView` from `expo-symbols` crash during module load on web even if not rendered. Use a simple `<Tabs>` with `@expo/vector-icons` for cross-platform tab layout.
 
+## SAF folder copy for Android external storage
+After download to `documentDirectory`, use `FileSystem.StorageAccessFramework` to copy to a user-chosen public folder (e.g. `indirilendramalar`). Flow: user taps folder banner → `requestDirectoryPermissionsAsync()` → URI stored in AsyncStorage → after each download, `createFileAsync` + `readAsStringAsync(base64)` + `writeAsStringAsync(base64)`.
+
+**Why:** Android 13+ forbids direct writes to external storage without SAF. `expo-media-library` (MediaStore) is the proper solution but requires a rebuild. SAF via `expo-file-system` works without a rebuild. Caveat: base64 copy may OOM for very large files (>~300MB); failure is caught and treated as non-fatal (file stays in documentDirectory).
+
+Folder URI is stored under AsyncStorage key `save_folder_uri` and mirrored in `saveFolderRef` (a `useRef`) inside `DownloadContext` so it's accessible synchronously inside the download callback without stale closure issues.
+
 ## Stream-video endpoint
 `GET /api/drama/stream-video?m3u8Url=URL&quality=1` downloads the fMP4 init segment + all numbered segments sequentially from `dizi.dramadizilerim.com`, piping them to the response. quality=0 is 1080p, quality=1 is next-best. Uses chunked transfer encoding; client gets `X-Segment-Count` header.
 

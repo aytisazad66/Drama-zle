@@ -2,10 +2,15 @@ import React, {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
 } from 'react';
+import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const SAVE_FOLDER_KEY = 'save_folder_uri';
 
 export type DownloadStatus =
   | 'queued'
@@ -34,6 +39,7 @@ export interface DownloadItem {
 
 interface DownloadContextValue {
   downloads: DownloadItem[];
+  saveFolderUri: string | null;
   addEpisodes: (episodes: {
     num: number;
     token: string;
@@ -46,6 +52,8 @@ interface DownloadContextValue {
   cancelDownload: (id: string) => void;
   clearCompleted: () => void;
   clearAll: () => void;
+  selectSaveFolder: () => Promise<boolean>;
+  clearSaveFolder: () => Promise<void>;
 }
 
 const DownloadContext = createContext<DownloadContextValue | null>(null);
@@ -64,6 +72,36 @@ function makeId(): string {
 
 export function DownloadProvider({ children }: { children: React.ReactNode }) {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [saveFolderUri, setSaveFolderUri] = useState<string | null>(null);
+  const saveFolderRef = useRef<string | null>(null);
+
+  // Load persisted folder URI on mount
+  useEffect(() => {
+    AsyncStorage.getItem(SAVE_FOLDER_KEY).then((v) => {
+      if (v) { setSaveFolderUri(v); saveFolderRef.current = v; }
+    });
+  }, []);
+
+  const selectSaveFolder = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return false;
+    try {
+      const result = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (result.granted) {
+        await AsyncStorage.setItem(SAVE_FOLDER_KEY, result.directoryUri);
+        setSaveFolderUri(result.directoryUri);
+        saveFolderRef.current = result.directoryUri;
+        return true;
+      }
+    } catch {}
+    return false;
+  }, []);
+
+  const clearSaveFolder = useCallback(async () => {
+    await AsyncStorage.removeItem(SAVE_FOLDER_KEY);
+    setSaveFolderUri(null);
+    saveFolderRef.current = null;
+  }, []);
+
   const isProcessingRef = useRef(false);
   const cancelledRef = useRef<Set<string>>(new Set());
   const activeResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
@@ -292,6 +330,46 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
+      // Step 4: Auto-copy to SAF save folder (indirilendramalar etc.) if configured
+      if (Platform.OS === 'android' && saveFolderRef.current) {
+        try {
+          const destUri = await FileSystem.StorageAccessFramework.createFileAsync(
+            saveFolderRef.current,
+            fileName,
+            'video/mp4',
+          );
+          const content = await FileSystem.readAsStringAsync(result.uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          await FileSystem.StorageAccessFramework.writeAsStringAsync(
+            destUri,
+            content,
+            { encoding: FileSystem.EncodingType.Base64 },
+          );
+          // Also copy subtitle if present
+          if (subtitlePath) {
+            try {
+              const subName = fileName.replace('.mp4', '.srt');
+              const subDest = await FileSystem.StorageAccessFramework.createFileAsync(
+                saveFolderRef.current,
+                subName,
+                'application/x-subrip',
+              );
+              const subContent = await FileSystem.readAsStringAsync(subtitlePath, {
+                encoding: FileSystem.EncodingType.Base64,
+              });
+              await FileSystem.StorageAccessFramework.writeAsStringAsync(
+                subDest,
+                subContent,
+                { encoding: FileSystem.EncodingType.Base64 },
+              );
+            } catch {}
+          }
+        } catch {
+          // Copy failure is non-fatal — file is still in documentDirectory
+        }
+      }
+
       updateItem(queued.id, {
         status: 'done',
         filePath: result.uri,
@@ -384,10 +462,13 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     <DownloadContext.Provider
       value={{
         downloads,
+        saveFolderUri,
         addEpisodes,
         cancelDownload,
         clearCompleted,
         clearAll,
+        selectSaveFolder,
+        clearSaveFolder,
       }}
     >
       {children}

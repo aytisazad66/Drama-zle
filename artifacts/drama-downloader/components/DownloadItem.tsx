@@ -92,11 +92,6 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
         </View>
 
         <View style={styles.actions}>
-          {item.status === 'done' && Platform.OS !== 'web' && (
-            <TouchableOpacity onPress={handleShare} style={styles.iconBtn}>
-              <Feather name="share-2" size={18} color={colors.success} />
-            </TouchableOpacity>
-          )}
           {(item.status === 'queued' || item.status === 'downloading' || item.status === 'extracting') && (
             <TouchableOpacity onPress={onCancel} style={styles.iconBtn}>
               <Feather name="x" size={18} color={colors.mutedForeground} />
@@ -135,6 +130,18 @@ export default function DownloadItemCard({ item, onCancel }: Props) {
           </Text>
         )}
       </View>
+
+      {/* Save button — shown when download is complete */}
+      {item.status === 'done' && Platform.OS !== 'web' && (
+        <TouchableOpacity
+          onPress={handleShare}
+          style={[styles.saveBtn, { backgroundColor: colors.primary }]}
+          activeOpacity={0.8}
+        >
+          <Feather name="save" size={15} color="#fff" />
+          <Text style={styles.saveBtnText}>Cihaza Kaydet / Paylaş</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -209,5 +216,20 @@ const styles = StyleSheet.create({
   bytesText: {
     fontSize: 12,
     fontFamily: 'Inter_400Regular',
+  },
+  saveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+    borderRadius: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+  },
+  saveBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
   },
 });
