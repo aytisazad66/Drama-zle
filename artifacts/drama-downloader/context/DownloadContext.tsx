@@ -95,7 +95,9 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Step 1: Fetch embed page directly on-device (bypasses Cloudflare cloud-IP blocks)
+      // Step 1: Fetch embed page — first collect session cookies from episode page,
+      // then use them on the embed request (Cloudflare requires a valid cf_clearance cookie).
+      // If direct device fetch fails or returns no m3u8, fall back to server-side /embed.
       updateItem(queued.id, { status: 'extracting' });
 
       const type = queued.tokenType === 'token' ? 'token' : 'ct';
@@ -104,45 +106,101 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           ? `https://dramadizilerim.com/embed.php?token=${encodeURIComponent(queued.token)}&v=2`
           : `https://dramadizilerim.com/embed.php?ct=${encodeURIComponent(queued.token)}`;
 
-      const embedPageRes = await fetch(embedPageUrl, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
-          'Referer': queued.episodeUrl ?? 'https://dramadizilerim.com/',
-        },
-      });
+      const MOBILE_UA =
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36';
+      const episodeReferer = queued.episodeUrl ?? 'https://dramadizilerim.com/';
 
-      if (!embedPageRes.ok) {
-        throw new Error(`Embed alınamadı: ${embedPageRes.status}`);
+      // --- Attempt 1: on-device fetch with session cookie ---
+      let embedHtml: string | null = null;
+      try {
+        // 1a: visit episode page to get Cloudflare session cookie
+        let cookieStr = '';
+        try {
+          const epRes = await fetch(episodeReferer, {
+            headers: {
+              'User-Agent': MOBILE_UA,
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
+            },
+            redirect: 'follow',
+          });
+          const rawCookie = epRes.headers.get('set-cookie') ?? '';
+          if (rawCookie) {
+            // "name=value; attrs, name2=value2; attrs" — split on comma before each new cookie
+            cookieStr = rawCookie
+              .split(/,\s*(?=[^;]+=[^;,]+)/)
+              .map((c) => c.split(';')[0]!.trim())
+              .filter(Boolean)
+              .join('; ');
+          }
+        } catch {
+          // proceed without cookie
+        }
+
+        // 1b: fetch embed page with the collected cookie
+        const embedRes = await fetch(embedPageUrl, {
+          headers: {
+            'User-Agent': MOBILE_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
+            'Referer': episodeReferer,
+            ...(cookieStr ? { 'Cookie': cookieStr } : {}),
+          },
+        });
+
+        if (embedRes.ok) {
+          const html = await embedRes.text();
+          // Accept only if it actually contains a video source (not an Access Denied page)
+          if (/m3u8|source\s*=|<source/.test(html)) {
+            embedHtml = html;
+          }
+        }
+      } catch {
+        // fall through to server-side attempt
       }
 
-      const embedHtml = await embedPageRes.text();
+      // --- Attempt 2: server-side /embed (has full cookie + header handling) ---
+      let m3u8Url: string | null = null;
+      let subtitleUrl: string | null = null;
 
-      // Parse m3u8 URL from embed HTML
-      const sourceMatch =
-        embedHtml.match(/let source\s*=\s*"([^"]+\.m3u8[^"]*)"/) ??
-        embedHtml.match(/source\s*=\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
-        embedHtml.match(/<source[^>]+src="(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
-        embedHtml.match(/"(https:\/\/dizi\.dramadizilerim\.com\/\?url=[^"]+\.m3u8[^"]*)"/);
+      if (embedHtml) {
+        // Parse from on-device HTML
+        const sourceMatch =
+          embedHtml.match(/let source\s*=\s*"([^"]+\.m3u8[^"]*)"/) ??
+          embedHtml.match(/source\s*=\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
+          embedHtml.match(/<source[^>]+src="(https?:\/\/[^"]+\.m3u8[^"]*)"/) ??
+          embedHtml.match(/"(https:\/\/dizi\.dramadizilerim\.com\/\?url=[^"]+\.m3u8[^"]*)"/);
+        m3u8Url = sourceMatch?.[1] ?? null;
 
-      const m3u8Url = sourceMatch?.[1] ?? null;
+        const srtCommentMatch = embedHtml.match(/first subtitle url:\s*(https?:\/\/\S+\.srt)/);
+        const srtProxyMatch = embedHtml.match(/(https?:\/\/dizi\.dramadizilerim\.com\/\?url=[^\s"]+\.srt)/);
+        const captionTokenMatch = embedHtml.match(/window\._captionUrl\s*=\s*"([^"]+)"/);
+        subtitleUrl =
+          srtCommentMatch?.[1] ??
+          srtProxyMatch?.[1] ??
+          (captionTokenMatch ? `https://dramadizilerim.com/${captionTokenMatch[1]}` : null);
+      }
 
-      // Parse subtitle URL
-      const srtCommentMatch = embedHtml.match(/first subtitle url:\s*(https?:\/\/\S+\.srt)/);
-      const srtProxyMatch = embedHtml.match(/(https?:\/\/dizi\.dramadizilerim\.com\/\?url=[^\s"]+\.srt)/);
-      const captionTokenMatch = embedHtml.match(/window\._captionUrl\s*=\s*"([^"]+)"/);
-      const subtitleUrl =
-        srtCommentMatch?.[1] ??
-        srtProxyMatch?.[1] ??
-        (captionTokenMatch ? `https://dramadizilerim.com/${captionTokenMatch[1]}` : null);
+      if (!m3u8Url) {
+        // On-device fetch failed or was blocked — try via server proxy
+        try {
+          const apiBase = getApiBase();
+          const serverUrl = `${apiBase}/embed?token=${encodeURIComponent(queued.token)}&tokenType=${encodeURIComponent(type)}${queued.episodeUrl ? `&episodeUrl=${encodeURIComponent(queued.episodeUrl)}` : ''}`;
+          const serverRes = await fetch(serverUrl);
+          if (serverRes.ok) {
+            const data = await serverRes.json() as { m3u8Url?: string; subtitleUrl?: string | null };
+            m3u8Url = data.m3u8Url ?? null;
+            subtitleUrl = data.subtitleUrl ?? null;
+          }
+        } catch {
+          // fall through — will throw below
+        }
+      }
 
       const embedData = { m3u8Url, subtitleUrl };
 
       if (!embedData.m3u8Url) {
-        const snippet = embedHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
-        throw new Error(`Parse: ${snippet}`);
+        throw new Error('Video URL bulunamadı. Site erişimi engelliyor olabilir.');
       }
 
       if (cancelledRef.current.has(queued.id)) {
