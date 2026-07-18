@@ -15,4 +15,13 @@ config.resolver.nodeModulesPaths = [
 ];
 config.watchFolders = [workspaceRoot];
 
+// react-native-reanimated ve react-native-worklets pre-built JS'lerinde
+// private class fields (#x) kullanıyor. Development build'deki Hermes bunu
+// desteklemediği için Metro'nun Babel'dan geçirmesi gerekiyor.
+// Sadece bu 2 paketi hedef alıyoruz, başka hiçbir şeye dokunmuyoruz.
+config.transformer = config.transformer ?? {};
+config.transformer.transformIgnorePatterns = [
+  'node_modules/(?!(react-native-reanimated|react-native-worklets)/)',
+];
+
 module.exports = config;
