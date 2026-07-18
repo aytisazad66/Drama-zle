@@ -1,14 +1,6 @@
 import { Router } from 'express';
-import { z } from 'zod';
 
 const router = Router();
-
-const uploadSchema = z.object({
-  videoUrl: z.string().url(),
-  videoType: z.enum(['hls', 'mp4']),
-  name: z.string(),
-  subtitleUrl: z.string().url().nullable().optional(),
-});
 
 /**
  * POST /api/drama/cf-upload
@@ -16,12 +8,16 @@ const uploadSchema = z.object({
  * Returns immediately with the video UID — CF processes asynchronously.
  */
 router.post('/cf-upload', async (req, res) => {
-  const parsed = uploadSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: 'Geçersiz istek', details: parsed.error.flatten() });
-  }
+  const { videoUrl, videoType, name } = req.body as {
+    videoUrl?: string;
+    videoType?: string;
+    name?: string;
+    subtitleUrl?: string | null;
+  };
 
-  const { videoUrl, videoType, name } = parsed.data;
+  if (!videoUrl || !videoType || !name) {
+    return res.status(400).json({ error: 'Geçersiz istek: videoUrl, videoType ve name zorunlu' });
+  }
   const accountId = process.env.CF_ACCOUNT_ID;
   const token = process.env.CF_STREAM_TOKEN;
 
