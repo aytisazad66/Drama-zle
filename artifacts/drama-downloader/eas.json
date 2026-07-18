@@ -1,0 +1,30 @@
+{
+  "cli": {
+    "version": ">= 21.0.2",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_DOMAIN": "drama-downloader--adilceliklon3ly.replit.app"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_DOMAIN": "drama-downloader--adilceliklon3ly.replit.app"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_DOMAIN": "drama-downloader--adilceliklon3ly.replit.app"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

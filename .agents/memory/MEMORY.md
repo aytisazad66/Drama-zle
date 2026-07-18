@@ -1,0 +1,1 @@
+- [Drama Downloader architecture](drama-downloader.md) — backend-proxied scraper + streaming; key regex and Metro gotchas documented
