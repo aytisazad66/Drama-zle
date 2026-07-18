@@ -213,14 +213,17 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Step 2: Download video via stream endpoint
+      // Step 2: Download video
       updateItem(queued.id, { status: 'downloading' });
 
       const epStr = queued.episodeNum.toString().padStart(2, '0');
       const fileName = `${queued.slug}_S${queued.season}E${epStr}.mp4`;
-      const dirPath = `${FileSystem.documentDirectory}drama-downloads/`;
-      await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
-      const filePath = dirPath + fileName;
+
+      // Save to documentDirectory/drama-downloads/ — accessible via Files app on iOS,
+      // and via any file manager on Android.
+      const saveDir = `${FileSystem.documentDirectory}drama-downloads/`;
+      await FileSystem.makeDirectoryAsync(saveDir, { intermediates: true });
+      const videoPath = saveDir + fileName;
 
       const streamUrl = `${getApiBase()}/stream-video?m3u8Url=${encodeURIComponent(
         embedData.m3u8Url
@@ -228,7 +231,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
 
       const resumable = FileSystem.createDownloadResumable(
         streamUrl,
-        filePath,
+        videoPath,
         {},
         (progress) => {
           updateItem(queued.id, {
@@ -246,9 +249,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       activeResumableRef.current = null;
 
       if (cancelledRef.current.has(queued.id)) {
-        try {
-          await FileSystem.deleteAsync(filePath, { idempotent: true });
-        } catch {}
+        try { await FileSystem.deleteAsync(videoPath, { idempotent: true }); } catch {}
         updateItem(queued.id, { status: 'error', error: 'İptal edildi' });
         isProcessingRef.current = false;
         setTimeout(processNext, 100);
@@ -259,17 +260,17 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         throw new Error('İndirme başarısız oldu');
       }
 
-      // Step 3: Download subtitle
+      // Step 3: Download subtitle to the same folder as the video
       let subtitlePath: string | undefined;
       if (embedData.subtitleUrl) {
         try {
           const subFileName = fileName.replace('.mp4', '.srt');
-          subtitlePath = dirPath + subFileName;
+          subtitlePath = saveDir + subFileName;
           const subUrl = `${getApiBase()}/subtitle?url=${encodeURIComponent(
             embedData.subtitleUrl
           )}`;
           await FileSystem.downloadAsync(subUrl, subtitlePath);
-        } catch (subErr) {
+        } catch {
           // Subtitle failure is non-fatal
           subtitlePath = undefined;
         }
