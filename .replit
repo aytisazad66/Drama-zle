@@ -38,3 +38,8 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+CF_ACCOUNT_ID = "5886a653a34c3c8e8b91d9d09dbce6f1"
