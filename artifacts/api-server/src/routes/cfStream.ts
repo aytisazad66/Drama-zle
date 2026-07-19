@@ -113,9 +113,10 @@ async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffe
  *   passes through Content-Length from the upstream MP4 server).
  */
 router.post('/cf-upload', async (req, res) => {
-  const { videoUrl, name } = req.body as {
+  const { videoUrl, name, creator } = req.body as {
     videoUrl?: string;
     name?: string;
+    creator?: string;
   };
 
   if (!videoUrl || !name) {
@@ -168,6 +169,7 @@ router.post('/cf-upload', async (req, res) => {
       new Blob([videoBuffer], { type: 'video/mp4' }),
       `${name}.mp4`,
     );
+    if (creator) formData.append('creator', creator);
 
     const cfRes = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream`,
@@ -226,7 +228,7 @@ router.post('/cf-upload', async (req, res) => {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url: videoUrl, meta: { name } }),
+      body: JSON.stringify({ url: videoUrl, meta: { name }, creator: creator ?? '' }),
     },
   );
 

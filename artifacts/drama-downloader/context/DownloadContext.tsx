@@ -272,6 +272,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({
           videoUrl: uploadVideoUrl,
           name: videoName,
+          creator: queued.seriesTitle,
         }),
       });
 
