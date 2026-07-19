@@ -93,16 +93,16 @@ async function setCfMeta(
   accountId: string,
   token: string,
   uid: string,
-  fields: { creator?: string; episodeNum?: number; season?: string },
+  fields: { name?: string; creator?: string; episodeNum?: number; season?: string },
 ): Promise<void> {
   const body: Record<string, unknown> = {};
   if (fields.creator) body.creator = fields.creator;
-  if (fields.episodeNum !== undefined || fields.season !== undefined) {
-    body.meta = {
-      ...(fields.episodeNum !== undefined && { episode: String(fields.episodeNum) }),
-      ...(fields.season !== undefined && { season: fields.season }),
-    };
-  }
+  // Always set meta so name is never lost
+  body.meta = {
+    ...(fields.name && { name: fields.name }),
+    ...(fields.episodeNum !== undefined && { episode: String(fields.episodeNum) }),
+    ...(fields.season !== undefined && { season: fields.season }),
+  };
 
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${uid}`,
@@ -285,7 +285,7 @@ router.post('/cf-upload', async (req, res) => {
 
     const result = parseCfResult(data);
     if (creator) {
-      try { await setCfMeta(accountId!, token!, result.uid, { creator, episodeNum, season }); }
+      try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season }); }
       catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
     }
     await maybeUploadCaption(result.uid);
@@ -317,7 +317,7 @@ router.post('/cf-upload', async (req, res) => {
 
   const result = parseCfResult(data);
   if (creator) {
-    try { await setCfMeta(accountId!, token!, result.uid, { creator, episodeNum, season }); }
+    try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season }); }
     catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
   }
   await maybeUploadCaption(result.uid);
