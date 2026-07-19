@@ -273,6 +273,7 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           videoUrl: uploadVideoUrl,
           name: videoName,
           creator: queued.seriesTitle,
+          subtitleUrl: subtitleUrl ?? undefined,
         }),
       });
 
