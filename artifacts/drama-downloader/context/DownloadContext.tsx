@@ -274,6 +274,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
           name: videoName,
           creator: queued.seriesTitle,
           subtitleUrl: subtitleUrl ?? undefined,
+          episodeNum: queued.episodeNum,
+          season: queued.season,
         }),
       });
 
