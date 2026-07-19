@@ -86,6 +86,30 @@ async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffe
 }
 
 /**
+ * Set creator on a CF Stream video after upload.
+ * Must be done as a separate request — multipart direct-upload ignores the creator form field.
+ */
+async function setCfCreator(
+  accountId: string,
+  token: string,
+  uid: string,
+  creator: string,
+): Promise<void> {
+  const res = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${uid}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ creator }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`CF creator set failed (${res.status}): ${err}`);
+  }
+}
+
+/**
  * Upload a subtitle file to CF Stream as a caption track.
  * Non-fatal — failure is logged but does not fail the video upload.
  *
@@ -249,6 +273,10 @@ router.post('/cf-upload', async (req, res) => {
     }
 
     const result = parseCfResult(data);
+    if (creator) {
+      try { await setCfCreator(accountId!, token!, result.uid, creator); }
+      catch (err) { req.log.warn({ err, uid: result.uid }, 'CF creator set failed (non-fatal)'); }
+    }
     await maybeUploadCaption(result.uid);
     return res.json(result);
   }
@@ -277,6 +305,10 @@ router.post('/cf-upload', async (req, res) => {
   }
 
   const result = parseCfResult(data);
+  if (creator) {
+    try { await setCfCreator(accountId!, token!, result.uid, creator); }
+    catch (err) { req.log.warn({ err, uid: result.uid }, 'CF creator set failed (non-fatal)'); }
+  }
   await maybeUploadCaption(result.uid);
   return res.json(result);
 });
