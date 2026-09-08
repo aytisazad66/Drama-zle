@@ -1,1 +1,2 @@
 - [Drama Downloader architecture](drama-downloader.md) — backend-proxied scraper + streaming; key regex and Metro gotchas documented
+- [Imported workspace runtime](imported-workspace-runtime.md) — install the pnpm lockfile before starting artifact workflows; API uses the injected artifact port and /api route

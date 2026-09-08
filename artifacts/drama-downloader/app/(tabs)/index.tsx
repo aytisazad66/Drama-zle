@@ -125,7 +125,7 @@ export default function HomeScreen() {
   }, [series, selected, addEpisodes]);
 
   const queuedCount = downloads.filter(
-    (d) => d.status === 'queued' || d.status === 'downloading' || d.status === 'extracting'
+    (d) => d.status === 'queued' || d.status === 'extracting'
   ).length;
 
   const topPad = Platform.OS === 'web' ? 67 : insets.top;

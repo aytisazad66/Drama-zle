@@ -260,7 +260,11 @@ router.post('/cf-upload', async (req, res) => {
     req.log.info({ bytes: videoBuffer.length, name }, 'HLS assembled, uploading to CF');
 
     const formData = new FormData();
-    formData.append('file', new Blob([videoBuffer], { type: 'video/mp4' }), `${name}.mp4`);
+    // Copy into an ArrayBuffer-backed view so TypeScript's Web Blob types
+    // accept the Node Buffer without changing the uploaded bytes.
+    const videoBytes = new Uint8Array(new ArrayBuffer(videoBuffer.byteLength));
+    videoBytes.set(videoBuffer);
+    formData.append('file', new Blob([videoBytes], { type: 'video/mp4' }), `${name}.mp4`);
     if (creator) formData.append('creator', creator);
 
     const cfRes = await fetch(

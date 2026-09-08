@@ -15,7 +15,6 @@ export default function TabLayout() {
   const activeCount = downloads.filter(
     (d) =>
       d.status === 'queued' ||
-      d.status === 'downloading' ||
       d.status === 'extracting'
   ).length;
 
