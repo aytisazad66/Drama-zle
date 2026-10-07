@@ -5,26 +5,6 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-export interface DramaCatalogItem {
-  title: string;
-  url: string;
-  /** @nullable */
-  posterUrl: string | null;
-}
-
-export interface DramaCatalogPage {
-  items: DramaCatalogItem[];
-  page: number;
-  hasMore: boolean;
-}
-
-export interface ErrorResponse {
-  error: string;
-}
-
-export interface HealthStatus {
-  status: string;
-}
 
 export type GetDramaCatalogParams = {
 /**
@@ -39,4 +19,3 @@ q?: string;
  */
 page?: number;
 };
-

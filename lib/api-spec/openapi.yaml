@@ -10,7 +10,50 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: drama
+    description: Drama catalog operations
 paths:
+  /drama/catalog:
+    get:
+      operationId: getDramaCatalog
+      tags: [drama]
+      summary: Search or browse the series catalog
+      description: Returns one page of series listed by the configured catalog source.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Optional series title search.
+          schema:
+            type: string
+            maxLength: 80
+        - name: page
+          in: query
+          required: false
+          description: Catalog page number, starting at 1.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: A page of catalog entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DramaCatalogPage"
+        "400":
+          description: Invalid catalog query.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: The catalog source could not be reached or parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /healthz:
     get:
       operationId: healthCheck
@@ -26,6 +69,41 @@ paths:
                 $ref: "#/components/schemas/HealthStatus"
 components:
   schemas:
+    DramaCatalogItem:
+      type: object
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+        posterUrl:
+          type: ["string", "null"]
+      required:
+        - title
+        - url
+        - posterUrl
+    DramaCatalogPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DramaCatalogItem"
+        page:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - items
+        - page
+        - hasMore
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
     HealthStatus:
       type: object
       properties:

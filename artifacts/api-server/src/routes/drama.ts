@@ -1,6 +1,17 @@
 import { Router, type Request, type Response } from "express";
+import {
+  GetDramaCatalogQueryParams,
+  GetDramaCatalogResponse,
+} from "@workspace/api-zod";
+import type { DramaCatalogPage } from "@workspace/api-zod";
 
 const router = Router();
+const DRAMA_ORIGIN = "https://dramadizilerim.com";
+const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
+const catalogCache = new Map<
+  string,
+  { expiresAt: number; value: DramaCatalogPage }
+>();
 
 const BASE_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -85,6 +96,200 @@ async function fetchBinary(url: string): Promise<Buffer> {
   return Buffer.from(ab);
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#(\d+);/g, (entity, decimal: string) => {
+      const codePoint = Number(decimal);
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (entity, hex: string) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+    })
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;|&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
+function readHtmlAttribute(tagAttributes: string, name: string): string | null {
+  const match = tagAttributes.match(
+    new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i"),
+  );
+  const value = match?.[1] ?? match?.[2] ?? match?.[3];
+  return value ? decodeHtmlEntities(value) : null;
+}
+
+function textFromHtml(value: string): string {
+  return decodeHtmlEntities(value.replace(/<[^>]*>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseCatalogItems(html: string): DramaCatalogPage["items"] {
+  const items: DramaCatalogPage["items"] = [];
+  const seen = new Set<string>();
+  const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const href = readHtmlAttribute(match[1] ?? "", "href");
+    if (!href) continue;
+
+    let seriesUrl: URL;
+    try {
+      seriesUrl = new URL(href, DRAMA_ORIGIN);
+    } catch {
+      continue;
+    }
+
+    if (seriesUrl.origin !== DRAMA_ORIGIN) continue;
+    const slugMatch = seriesUrl.pathname.match(/^\/dizi\/([^/]+)\/?$/);
+    if (!slugMatch) continue;
+
+    const slug = slugMatch[1]!;
+    const canonicalUrl = new URL(`/dizi/${slug}`, DRAMA_ORIGIN).toString();
+    if (seen.has(canonicalUrl)) continue;
+
+    const contents = match[2] ?? "";
+    const heading = contents.match(
+      /<h[1-6]\b[^>]*class=["'][^"']*\bvideo-(?:item-)?title\b[^"']*["'][^>]*>([\s\S]*?)<\/h[1-6]\s*>/i,
+    )?.[1];
+    const imageTag = contents.match(/<img\b[^>]*>/i)?.[0];
+    const imageAlt = imageTag
+      ? readHtmlAttribute(imageTag, "alt")
+      : null;
+    const anchorTitle = readHtmlAttribute(match[1] ?? "", "title");
+    const title = textFromHtml(heading ?? anchorTitle ?? imageAlt ?? "")
+      .replace(/\s+(?:poster|izle)$/i, "")
+      .trim();
+    if (!title) continue;
+
+    const posterSource = imageTag
+      ? readHtmlAttribute(imageTag, "src") ??
+        readHtmlAttribute(imageTag, "data-src") ??
+        readHtmlAttribute(imageTag, "data-lazy-src")
+      : null;
+    let posterUrl: string | null = null;
+    if (posterSource) {
+      try {
+        const parsedPoster = new URL(posterSource, DRAMA_ORIGIN);
+        if (parsedPoster.protocol === "https:") {
+          posterUrl = parsedPoster.toString();
+        }
+      } catch {
+        // An invalid poster does not make the series entry unusable.
+      }
+    }
+
+    seen.add(canonicalUrl);
+    items.push({ title, url: canonicalUrl, posterUrl });
+  }
+
+  return items;
+}
+
+async function fetchCatalogHtml(url: string): Promise<string> {
+  const response = await fetch(url, {
+    headers: {
+      ...BASE_HEADERS,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: `${DRAMA_ORIGIN}/dizi`,
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Catalog source returned HTTP ${response.status}`);
+  }
+  return response.text();
+}
+
+function findFirstEpisodeUrl(html: string): URL | null {
+  const anchorRegex = /<a\b([^>]*)>/gi;
+  let firstEpisode: URL | null = null;
+  let match: RegExpExecArray | null;
+
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const href = readHtmlAttribute(match[1] ?? "", "href");
+    if (!href) continue;
+
+    try {
+      const candidate = new URL(href, DRAMA_ORIGIN);
+      if (
+        candidate.origin !== DRAMA_ORIGIN ||
+        !/^\/izle\/[^/]+\/?$/.test(candidate.pathname)
+      ) {
+        continue;
+      }
+
+      if (candidate.searchParams.get("e") === "1") return candidate;
+      firstEpisode ??= candidate;
+    } catch {
+      // Ignore malformed links in the source page.
+    }
+  }
+
+  return firstEpisode;
+}
+
+// --- GET /drama/catalog?q=<title>&page=<page> ---
+router.get("/catalog", async (req: Request, res: Response) => {
+  const parsedQuery = GetDramaCatalogQueryParams.safeParse(req.query);
+  if (!parsedQuery.success) {
+    res.status(400).json({ error: "Geçersiz katalog araması" });
+    return;
+  }
+
+  const query = parsedQuery.data.q?.trim() ?? "";
+  const page = parsedQuery.data.page ?? 1;
+  if (!Number.isInteger(page)) {
+    res.status(400).json({ error: "Sayfa numarası tam sayı olmalı" });
+    return;
+  }
+
+  const cacheKey = `${query.toLocaleLowerCase("tr-TR")}:${page}`;
+  const cached = catalogCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    res.json(cached.value);
+    return;
+  }
+  if (cached) catalogCache.delete(cacheKey);
+
+  try {
+    const sourceUrl = new URL(query ? "/search" : "/dizi", DRAMA_ORIGIN);
+    if (query) sourceUrl.searchParams.set("q", query);
+    sourceUrl.searchParams.set("page", String(page));
+
+    const html = await fetchCatalogHtml(sourceUrl.toString());
+    const payload = GetDramaCatalogResponse.parse({
+      items: parseCatalogItems(html),
+      page,
+      hasMore:
+        /<a\b[^>]*\brel=["'][^"']*\bnext\b[^"']*["'][^>]*>/i.test(html),
+    });
+
+    catalogCache.set(cacheKey, {
+      expiresAt: Date.now() + CATALOG_CACHE_TTL_MS,
+      value: payload,
+    });
+    if (catalogCache.size > 100) {
+      const oldestKey = catalogCache.keys().next().value;
+      if (oldestKey) catalogCache.delete(oldestKey);
+    }
+
+    res.json(payload);
+  } catch (err) {
+    req.log.error(
+      { err, page, hasSearch: Boolean(query) },
+      "drama catalog fetch failed",
+    );
+    res.status(502).json({ error: "Dizi kataloğu şu anda alınamıyor" });
+  }
+});
+
 // --- GET /drama/extract?url=<episode_page_url> ---
 // Returns list of all episodes (token + episode number) from the season page
 router.get("/extract", async (req: Request, res: Response) => {
@@ -96,6 +301,40 @@ router.get("/extract", async (req: Request, res: Response) => {
 
   try {
     const pageUrl = new URL(url);
+    if (
+      pageUrl.protocol !== "https:" ||
+      !["dramadizilerim.com", "www.dramadizilerim.com"].includes(
+        pageUrl.hostname.toLowerCase(),
+      )
+    ) {
+      res.status(400).json({ error: "Yalnızca DramaDizilerim bağlantıları desteklenir" });
+      return;
+    }
+
+    if (/^\/dizi\/[^/]+\/?$/.test(pageUrl.pathname)) {
+      const detailHtml = await fetchHtml(
+        pageUrl.toString(),
+        `${DRAMA_ORIGIN}/dizi`,
+      );
+      const firstEpisodeUrl = findFirstEpisodeUrl(detailHtml);
+      if (firstEpisodeUrl) {
+        pageUrl.href = firstEpisodeUrl.href;
+      } else {
+        const slug = pageUrl.pathname.split("/").filter(Boolean).at(-1);
+        if (!slug) {
+          res.status(400).json({ error: "Dizi bağlantısı tanınamadı" });
+          return;
+        }
+        pageUrl.pathname = `/izle/${slug}`;
+        pageUrl.search = "?s=1&e=1";
+      }
+    }
+
+    if (!/^\/izle\/[^/]+\/?$/.test(pageUrl.pathname)) {
+      res.status(400).json({ error: "Dizi bağlantısı tanınamadı" });
+      return;
+    }
+
     // Always load from e=1 to get all episodes listed on the page
     pageUrl.searchParams.set("e", "1");
     const slug = pageUrl.pathname.replace("/izle/", "").replace(/\/$/, "");
@@ -112,6 +351,7 @@ router.get("/extract", async (req: Request, res: Response) => {
       ? titleMatch[1]
           .replace(/\s*\|.*$/, "")              // strip "| DramaDizilerim"
           .replace(/\s*-\s*DramaDizilerim.*/i, "")
+          .replace(/\s+\d+\.\s*(?:Bölüm|Episode)\b.*/i, "")
           .replace(/\s+(Sezon|Season)\s+\d+.*/i, "")
           .replace(/\s+Bölüm\s+\d+.*/i, "")
           .replace(/\s+izle\s*/i, "")
@@ -155,7 +395,14 @@ router.get("/extract", async (req: Request, res: Response) => {
       tokenType,
     }));
 
-    res.json({ title, slug, season, totalEpisodes, episodes });
+    res.json({
+      title,
+      slug,
+      season,
+      totalEpisodes,
+      episodes,
+      episodeUrl: pageUrl.toString(),
+    });
   } catch (err) {
     req.log.error({ err, url }, "extract failed");
     res.status(500).json({ error: "Sayfa okunamadı" });

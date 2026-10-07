@@ -1,10 +1,8 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
+  Image,
   Platform,
-  Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -14,8 +12,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useColors } from '@/hooks/useColors';
 import { useDownloads } from '@/context/DownloadContext';
+import {
+  getGetDramaCatalogQueryKey,
+  useGetDramaCatalog,
+  type DramaCatalogItem,
+} from '@workspace/api-client-react';
 
 const SAMPLE_URL =
   'https://dramadizilerim.com/izle/yoksul-kocam-isik-tanrisi?s=1&e=1';
@@ -32,6 +36,7 @@ interface SeriesInfo {
   season: string;
   totalEpisodes: number;
   episodes: Episode[];
+  episodeUrl: string;
 }
 
 function getApiBase(): string {
@@ -48,19 +53,73 @@ export default function HomeScreen() {
   const { addEpisodes, downloads } = useDownloads();
 
   const [url, setUrl] = useState('');
+  const [catalogSearchText, setCatalogSearchText] = useState('');
+  const [activeCatalogSearch, setActiveCatalogSearch] = useState('');
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogItems, setCatalogItems] = useState<DramaCatalogItem[]>([]);
+  const [manualUrlOpen, setManualUrlOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [series, setSeries] = useState<SeriesInfo | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  const handleFetch = useCallback(async () => {
-    const trimmed = url.trim();
+  const catalogParams = {
+    q: activeCatalogSearch || undefined,
+    page: catalogPage,
+  };
+  const catalogQuery = useGetDramaCatalog(
+    catalogParams,
+    {
+      query: {
+        queryKey: getGetDramaCatalogQueryKey(catalogParams),
+        staleTime: 5 * 60 * 1000,
+        retry: 1,
+      },
+    },
+  );
+
+  useEffect(() => {
+    const pageData = catalogQuery.data;
+    if (!pageData) return;
+
+    setCatalogItems((previous) => {
+      if (catalogPage === 1) return pageData.items;
+      const existingUrls = new Set(previous.map((item) => item.url));
+      return [
+        ...previous,
+        ...pageData.items.filter((item) => !existingUrls.has(item.url)),
+      ];
+    });
+  }, [catalogQuery.data, catalogPage]);
+
+  const handleCatalogSearch = useCallback(() => {
+    const query = catalogSearchText.trim();
+    if (query === activeCatalogSearch && catalogPage === 1) {
+      void catalogQuery.refetch();
+      return;
+    }
+
+    setError(null);
+    setSeries(null);
+    setCatalogItems([]);
+    setCatalogPage(1);
+    setActiveCatalogSearch(query);
+  }, [
+    activeCatalogSearch,
+    catalogPage,
+    catalogQuery.refetch,
+    catalogSearchText,
+  ]);
+
+  const handleFetch = useCallback(async (inputUrl: string = url) => {
+    const trimmed = inputUrl.trim();
     if (!trimmed) return;
 
     setLoading(true);
     setError(null);
     setSeries(null);
     setSelected(new Set());
+    setUrl(trimmed);
 
     try {
       const res = await fetch(
@@ -72,6 +131,7 @@ export default function HomeScreen() {
       }
       const data: SeriesInfo = await res.json();
       setSeries(data);
+      setUrl(data.episodeUrl || trimmed);
       // Select all by default
       setSelected(new Set(data.episodes.map((e) => e.num)));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -83,6 +143,11 @@ export default function HomeScreen() {
       setLoading(false);
     }
   }, [url]);
+
+  const handleSelectCatalogItem = useCallback((item: DramaCatalogItem) => {
+    setManualUrlOpen(false);
+    void handleFetch(item.url);
+  }, [handleFetch]);
 
   const toggleEpisode = useCallback((num: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -122,7 +187,7 @@ export default function HomeScreen() {
         episodeUrl: url.trim(),
       }))
     );
-  }, [series, selected, addEpisodes]);
+  }, [series, selected, addEpisodes, url]);
 
   const queuedCount = downloads.filter(
     (d) => d.status === 'queued' || d.status === 'extracting'
@@ -155,69 +220,254 @@ export default function HomeScreen() {
         )}
       </View>
 
-      <ScrollView
+      <KeyboardAwareScrollViewCompat
+        bottomOffset={20}
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* URL Input */}
-        <View style={[styles.inputCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.label, { color: colors.mutedForeground }]}>
-            Dizi URL'i
-          </Text>
-          <View style={styles.inputRow}>
-            <TextInput
+        {!series && (
+          <>
+            <View
               style={[
-                styles.input,
-                { color: colors.foreground, borderColor: colors.border },
+                styles.inputCard,
+                { backgroundColor: colors.card, borderColor: colors.border },
               ]}
-              value={url}
-              onChangeText={setUrl}
-              placeholder={SAMPLE_URL}
-              placeholderTextColor={colors.mutedForeground}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              onSubmitEditing={handleFetch}
-              returnKeyType="search"
-            />
-            {url.length > 0 && (
-              <TouchableOpacity
-                onPress={() => {
-                  setUrl('');
-                  setSeries(null);
-                  setError(null);
-                }}
-                style={styles.clearBtn}
+            >
+              <Text style={[styles.label, { color: colors.mutedForeground }]}>
+                Drama Dizilerim kataloğu
+              </Text>
+              <View style={styles.catalogSearchRow}>
+                <TextInput
+                  style={[
+                    styles.catalogSearchInput,
+                    {
+                      color: colors.foreground,
+                      borderColor: colors.border,
+                      backgroundColor: colors.background,
+                    },
+                  ]}
+                  value={catalogSearchText}
+                  onChangeText={setCatalogSearchText}
+                  placeholder="Dizi adı ara..."
+                  placeholderTextColor={colors.mutedForeground}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  onSubmitEditing={handleCatalogSearch}
+                />
+                <TouchableOpacity
+                  style={[
+                    styles.catalogSearchBtn,
+                    { backgroundColor: colors.primary },
+                  ]}
+                  onPress={handleCatalogSearch}
+                  activeOpacity={0.85}
+                  accessibilityLabel="Dizi ara"
+                >
+                  <Feather name="search" size={18} color="#fff" />
+                </TouchableOpacity>
+              </View>
+              <Text style={[styles.catalogCaption, { color: colors.mutedForeground }]}>
+                Listeden dizi seçince bölümleri otomatik bulunur.
+              </Text>
+            </View>
+
+            {catalogQuery.isError && (
+              <View
+                style={[
+                  styles.errorCard,
+                  {
+                    backgroundColor: `${colors.destructive}22`,
+                    borderColor: colors.destructive,
+                  },
+                ]}
               >
-                <Feather name="x-circle" size={18} color={colors.mutedForeground} />
+                <Feather name="alert-circle" size={16} color={colors.destructive} />
+                <Text style={[styles.errorText, { color: colors.destructive }]}>
+                  {catalogQuery.error instanceof Error
+                    ? catalogQuery.error.message
+                    : 'Dizi kataloğu yüklenemedi.'}
+                </Text>
+                <TouchableOpacity onPress={() => void catalogQuery.refetch()}>
+                  <Text style={[styles.retryText, { color: colors.destructive }]}>
+                    Tekrar dene
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {catalogQuery.isLoading && catalogItems.length === 0 && (
+              <View style={styles.catalogLoading}>
+                <ActivityIndicator color={colors.primary} />
+                <Text style={[styles.catalogCaption, { color: colors.mutedForeground }]}>
+                  Diziler yükleniyor...
+                </Text>
+              </View>
+            )}
+
+            {!catalogQuery.isLoading &&
+              !catalogQuery.isError &&
+              catalogItems.length === 0 && (
+                <Text style={[styles.catalogEmpty, { color: colors.mutedForeground }]}>
+                  {activeCatalogSearch
+                    ? 'Bu aramayla eşleşen dizi bulunamadı.'
+                    : 'Katalogda gösterilecek dizi bulunamadı.'}
+                </Text>
+              )}
+
+            <View style={styles.catalogResults}>
+              {catalogItems.map((item) => (
+                <TouchableOpacity
+                  key={item.url}
+                  style={[
+                    styles.catalogItem,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                  onPress={() => handleSelectCatalogItem(item)}
+                  disabled={loading}
+                  activeOpacity={0.75}
+                >
+                  {item.posterUrl ? (
+                    <Image
+                      source={{ uri: item.posterUrl }}
+                      style={[styles.catalogPoster, { backgroundColor: colors.secondary }]}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View
+                      style={[
+                        styles.catalogPosterFallback,
+                        { backgroundColor: colors.secondary },
+                      ]}
+                    >
+                      <Feather name="film" size={20} color={colors.mutedForeground} />
+                    </View>
+                  )}
+                  <View style={styles.catalogItemText}>
+                    <Text
+                      style={[styles.catalogItemTitle, { color: colors.foreground }]}
+                      numberOfLines={2}
+                    >
+                      {item.title}
+                    </Text>
+                    <Text style={[styles.catalogItemMeta, { color: colors.mutedForeground }]}>
+                      Bölümleri göster
+                    </Text>
+                  </View>
+                  {loading ? (
+                    <ActivityIndicator color={colors.primary} size="small" />
+                  ) : (
+                    <Feather name="chevron-right" size={20} color={colors.mutedForeground} />
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {catalogQuery.data?.hasMore && (
+              <TouchableOpacity
+                style={[
+                  styles.loadMoreBtn,
+                  { backgroundColor: colors.secondary, borderColor: colors.border },
+                ]}
+                onPress={() => setCatalogPage((currentPage) => currentPage + 1)}
+                disabled={catalogQuery.isFetching}
+                activeOpacity={0.75}
+              >
+                {catalogQuery.isFetching ? (
+                  <ActivityIndicator color={colors.primary} size="small" />
+                ) : (
+                  <Text style={[styles.loadMoreText, { color: colors.foreground }]}>
+                    Daha fazla dizi yükle
+                  </Text>
+                )}
               </TouchableOpacity>
             )}
-          </View>
 
-          <TouchableOpacity
-            style={[
-              styles.fetchBtn,
-              {
-                backgroundColor: loading ? colors.secondary : colors.primary,
-                opacity: loading ? 0.7 : 1,
-              },
-            ]}
-            onPress={handleFetch}
-            disabled={loading || !url.trim()}
-            activeOpacity={0.85}
-          >
-            {loading ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <>
-                <Feather name="search" size={16} color="#fff" />
-                <Text style={styles.fetchBtnText}>Bölümleri Bul</Text>
-              </>
+            <TouchableOpacity
+              style={styles.manualLinkToggle}
+              onPress={() => setManualUrlOpen((open) => !open)}
+              activeOpacity={0.7}
+            >
+              <Feather
+                name={manualUrlOpen ? 'chevron-up' : 'link'}
+                size={15}
+                color={colors.mutedForeground}
+              />
+              <Text style={[styles.manualLinkText, { color: colors.mutedForeground }]}>
+                {manualUrlOpen ? 'Bağlantı alanını gizle' : 'Dizi bağlantısıyla ekle'}
+              </Text>
+            </TouchableOpacity>
+
+            {manualUrlOpen && (
+              <View
+                style={[
+                  styles.inputCard,
+                  { backgroundColor: colors.card, borderColor: colors.border },
+                ]}
+              >
+                <Text style={[styles.label, { color: colors.mutedForeground }]}>
+                  Dizi veya bölüm bağlantısı
+                </Text>
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={[
+                      styles.input,
+                      { color: colors.foreground, borderColor: colors.border },
+                    ]}
+                    value={url}
+                    onChangeText={setUrl}
+                    placeholder={SAMPLE_URL}
+                    placeholderTextColor={colors.mutedForeground}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                    onSubmitEditing={() => void handleFetch()}
+                    returnKeyType="search"
+                  />
+                  {url.length > 0 && (
+                    <TouchableOpacity
+                      onPress={() => {
+                        setUrl('');
+                        setSeries(null);
+                        setError(null);
+                      }}
+                      style={styles.clearBtn}
+                    >
+                      <Feather
+                        name="x-circle"
+                        size={18}
+                        color={colors.mutedForeground}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={[
+                    styles.fetchBtn,
+                    {
+                      backgroundColor: loading ? colors.secondary : colors.primary,
+                      opacity: loading ? 0.7 : 1,
+                    },
+                  ]}
+                  onPress={() => void handleFetch()}
+                  disabled={loading || !url.trim()}
+                  activeOpacity={0.85}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <>
+                      <Feather name="search" size={16} color="#fff" />
+                      <Text style={styles.fetchBtnText}>Bölümleri Bul</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
             )}
-          </TouchableOpacity>
-        </View>
+          </>
+        )}
 
         {/* Error */}
         {error && (
@@ -237,6 +487,19 @@ export default function HomeScreen() {
         {/* Series info + episode list */}
         {series && (
           <View style={styles.seriesSection}>
+            <TouchableOpacity
+              style={styles.backToCatalog}
+              onPress={() => {
+                setSeries(null);
+                setError(null);
+              }}
+              activeOpacity={0.7}
+            >
+              <Feather name="arrow-left" size={15} color={colors.primary} />
+              <Text style={[styles.backToCatalogText, { color: colors.primary }]}>
+                Dizilere dön
+              </Text>
+            </TouchableOpacity>
             <View style={styles.seriesHeader}>
               <View>
                 <Text style={[styles.seriesTitle, { color: colors.foreground }]}>
@@ -325,30 +588,8 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Hint when empty */}
-        {!series && !loading && !error && (
-          <View style={styles.hint}>
-            <Feather name="film" size={40} color={colors.mutedForeground} />
-            <Text style={[styles.hintTitle, { color: colors.foreground }]}>
-              Dizi URL'i yapıştır
-            </Text>
-            <Text style={[styles.hintSub, { color: colors.mutedForeground }]}>
-              dramadizilerim.com linkini yukarıya girerek{'\n'}
-              tüm bölümleri tek tıkla indirebilirsin.
-            </Text>
-            <TouchableOpacity
-              onPress={() => setUrl(SAMPLE_URL)}
-              style={[styles.sampleBtn, { borderColor: colors.border }]}
-            >
-              <Text style={[styles.sampleBtnText, { color: colors.mutedForeground }]}>
-                Örnek URL dene
-              </Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
         <View style={{ height: 100 + (Platform.OS === 'web' ? 34 : insets.bottom) }} />
-      </ScrollView>
+      </KeyboardAwareScrollViewCompat>
     </View>
   );
 }
@@ -395,6 +636,109 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 10,
     marginBottom: 12,
+  },
+  catalogSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  catalogSearchInput: {
+    flex: 1,
+    height: 48,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    fontFamily: 'Inter_400Regular',
+  },
+  catalogSearchBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  catalogCaption: {
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: 'Inter_400Regular',
+  },
+  catalogLoading: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 24,
+  },
+  catalogEmpty: {
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    textAlign: 'center',
+    paddingVertical: 18,
+  },
+  catalogResults: {
+    gap: 8,
+    marginBottom: 10,
+  },
+  catalogItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 10,
+  },
+  catalogPoster: {
+    width: 48,
+    height: 64,
+    borderRadius: 8,
+  },
+  catalogPosterFallback: {
+    width: 48,
+    height: 64,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  catalogItemText: {
+    flex: 1,
+    gap: 5,
+  },
+  catalogItemTitle: {
+    fontSize: 14,
+    lineHeight: 19,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  catalogItemMeta: {
+    fontSize: 11,
+    fontFamily: 'Inter_400Regular',
+  },
+  loadMoreBtn: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  loadMoreText: {
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  manualLinkToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  manualLinkText: {
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
+  },
+  retryText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
   },
   label: {
     fontSize: 12,
@@ -449,6 +793,17 @@ const styles = StyleSheet.create({
   seriesSection: {
     gap: 14,
     marginBottom: 12,
+  },
+  backToCatalog: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  backToCatalogText: {
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
   },
   seriesHeader: {
     flexDirection: 'row',
