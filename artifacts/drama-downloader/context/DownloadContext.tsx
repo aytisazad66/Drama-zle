@@ -132,6 +132,8 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     }
 
     isProcessingRef.current = true;
+    let stopQueueAfterError = false;
+    let queueStopCode: string | undefined;
 
     try {
       if (cancelledRef.current.has(queued.id)) {
@@ -282,8 +284,17 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
       if (!uploadRes.ok) {
         let errMsg = 'Cloudflare yükleme başarısız';
         try {
-          const errData = await uploadRes.json() as { error?: string };
+          const errData = await uploadRes.json() as {
+            error?: string;
+            errorCode?: string;
+          };
           if (errData.error) errMsg = errData.error;
+          queueStopCode = errData.errorCode;
+          stopQueueAfterError = [
+            'CF_AUTH',
+            'CF_PERMISSION',
+            'CF_RATE_LIMIT',
+          ].includes(queueStopCode ?? '');
         } catch {}
         throw new Error(errMsg);
       }
@@ -302,12 +313,32 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Bilinmeyen hata';
-      updateItem(queued.id, { status: 'error', error: message });
+      if (stopQueueAfterError) {
+        const pendingMessage =
+          queueStopCode === 'CF_RATE_LIMIT'
+            ? 'Cloudflare hız sınırı nedeniyle bu bölüm beklemeye alındı.'
+            : 'Cloudflare ayar hatası nedeniyle bu bölüm beklemeye alındı.';
+        setDownloads((prev) =>
+          prev.map((item) => {
+            if (item.id === queued.id) {
+              return { ...item, status: 'error', error: message };
+            }
+            if (item.status === 'queued') {
+              return { ...item, status: 'error', error: pendingMessage };
+            }
+            return item;
+          }),
+        );
+      } else {
+        updateItem(queued.id, { status: 'error', error: message });
+      }
     }
 
     isProcessingRef.current = false;
     // 4-second cooldown between episodes to avoid rate-limiting by the video server
-    setTimeout(processNext, 4000);
+    if (!stopQueueAfterError) {
+      setTimeout(processNext, 4000);
+    }
   }, [updateItem]);
 
   const addEpisodes = useCallback(

@@ -181,6 +181,55 @@ function parseCfResult(data: {
   };
 }
 
+function getCfUploadError(status: number, responseBody: string): {
+  error: string;
+  errorCode: 'CF_AUTH' | 'CF_PERMISSION' | 'CF_RATE_LIMIT' | 'CF_API_ERROR';
+} {
+  let codes: number[] = [];
+  try {
+    const body = JSON.parse(responseBody) as {
+      errors?: { code?: number }[];
+    };
+    codes = body.errors?.flatMap((item) =>
+      typeof item.code === 'number' ? [item.code] : [],
+    ) ?? [];
+  } catch {
+    // Keep the HTTP status as the fallback classification.
+  }
+
+  if (status === 401 || codes.includes(10000)) {
+    return {
+      error:
+        'Cloudflare tokenı doğrulanamadı. CF_STREAM_TOKEN değerini ve tokenın doğru Cloudflare hesabına ait olduğunu kontrol edin.',
+      errorCode: 'CF_AUTH',
+    };
+  }
+  if (status === 403) {
+    return {
+      error:
+        'Cloudflare tokenında Stream Write izni yok. Token izinlerini kontrol edin.',
+      errorCode: 'CF_PERMISSION',
+    };
+  }
+  if (status === 429 || codes.includes(10429)) {
+    return {
+      error:
+        'Cloudflare istek sınırı aşıldı. Bir süre bekleyin; indirme kuyruğu durduruldu.',
+      errorCode: 'CF_RATE_LIMIT',
+    };
+  }
+
+  return {
+    error: `Cloudflare API isteği başarısız oldu (HTTP ${status}).`,
+    errorCode: 'CF_API_ERROR',
+  };
+}
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  return message.replace(/https?:\/\/\S+/g, '[source URL]');
+}
+
 /**
  * POST /api/drama/cf-upload
  *
@@ -247,13 +296,23 @@ router.post('/cf-upload', async (req, res) => {
 
   // ── HLS: assemble segments locally, direct multipart upload ────────────────
   if (isHls) {
-    req.log.info({ m3u8Url, qualityIndex, name }, 'CF upload: assembling HLS');
+    const sourceHost = (() => {
+      try {
+        return new URL(m3u8Url).host;
+      } catch {
+        return undefined;
+      }
+    })();
+    req.log.info({ sourceHost, qualityIndex, name }, 'CF upload: assembling HLS');
 
     let videoBuffer: Buffer;
     try {
       videoBuffer = await assembleHls(m3u8Url, qualityIndex);
     } catch (err) {
-      req.log.error({ err, m3u8Url }, 'HLS assembly failed');
+      req.log.error(
+        { error: safeErrorMessage(err), sourceHost },
+        'HLS assembly failed',
+      );
       return res.status(502).json({ error: 'HLS video indirilemedi' });
     }
 
@@ -279,7 +338,7 @@ router.post('/cf-upload', async (req, res) => {
     if (!cfRes.ok) {
       const errText = await cfRes.text();
       req.log.error({ cfStatus: cfRes.status, cfBody: errText, name }, 'CF HLS upload failed');
-      return res.status(502).json({ error: 'Cloudflare API hatası', details: errText });
+      return res.status(502).json(getCfUploadError(cfRes.status, errText));
     }
 
     const data = await cfRes.json() as { result: any; success: boolean; errors?: { message: string }[] };
@@ -297,7 +356,7 @@ router.post('/cf-upload', async (req, res) => {
   }
 
   // ── MP4: copy-from-URL (CF fetches from our proxy, Content-Length intact) ──
-  req.log.info({ videoUrl, name }, 'CF upload: copy-from-URL (MP4)');
+  req.log.info({ name }, 'CF upload: copy-from-URL (MP4)');
 
   const cfRes = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/copy`,
@@ -310,8 +369,8 @@ router.post('/cf-upload', async (req, res) => {
 
   if (!cfRes.ok) {
     const errText = await cfRes.text();
-    req.log.error({ cfStatus: cfRes.status, cfBody: errText, videoUrl }, 'CF MP4 copy failed');
-    return res.status(502).json({ error: 'Cloudflare API hatası', details: errText });
+    req.log.error({ cfStatus: cfRes.status, cfBody: errText, name }, 'CF MP4 copy failed');
+    return res.status(502).json(getCfUploadError(cfRes.status, errText));
   }
 
   const data = await cfRes.json() as { result: any; success: boolean; errors?: { message: string }[] };
