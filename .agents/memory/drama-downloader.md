@@ -47,3 +47,10 @@ Folder URI is stored under AsyncStorage key `save_folder_uri` and mirrored in `s
 
 ## Cloudflare / server-side fetch
 Plain Node.js fetch (no cookies) successfully fetches the drama page HTML — Cloudflare does not block it in this context. The site serves fully server-rendered HTML including all episode ct-tokens without requiring JS execution.
+
+## Cloudflare Stream token scope
+The Cloudflare Stream URL-copy upload endpoint requires the API token permission `Stream Write`.
+
+**Why:** Cloudflare rejects the upload request with HTTP 401 when the configured token is not accepted; the official endpoint documents `Stream Write` as an accepted permission.
+
+**How to apply:** When setting `CF_STREAM_TOKEN`, use a token scoped to the same account as `CF_ACCOUNT_ID` and grant `Stream Write`.
