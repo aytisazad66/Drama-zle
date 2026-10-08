@@ -4,6 +4,7 @@ import {
   GetDramaCatalogResponse,
 } from "@workspace/api-zod";
 import type { DramaCatalogPage } from "@workspace/api-zod";
+import { parseMasterM3u8, parseVariantM3u8 } from "./hlsUtils";
 
 const router = Router();
 const DRAMA_ORIGIN = "https://dramadizilerim.com";
@@ -69,7 +70,9 @@ async function fetchHtmlWithCookies(
   return { html: await response.text(), cookie: newCookie };
 }
 
-async function fetchText(url: string): Promise<string> {
+async function fetchTextWithUrl(
+  url: string,
+): Promise<{ text: string; url: string }> {
   const response = await fetch(url, {
     headers: {
       ...BASE_HEADERS,
@@ -80,7 +83,7 @@ async function fetchText(url: string): Promise<string> {
   });
   if (!response.ok)
     throw new Error(`HTTP ${response.status} fetching ${url}`);
-  return response.text();
+  return { text: await response.text(), url: response.url || url };
 }
 
 async function fetchBinary(url: string): Promise<Buffer> {
@@ -498,8 +501,11 @@ router.get("/segments", async (req: Request, res: Response) => {
   const qualityIndex = parseInt((quality as string) ?? "0") || 0;
 
   try {
-    const masterM3u8 = await fetchText(m3u8Url);
-    const variants = parseMasterM3u8(masterM3u8);
+    const masterPlaylist = await fetchTextWithUrl(m3u8Url);
+    const variants = parseMasterM3u8(
+      masterPlaylist.text,
+      masterPlaylist.url,
+    );
 
     if (variants.length === 0) {
       res.status(404).json({ error: "Video kalitesi bulunamadı" });
@@ -507,8 +513,11 @@ router.get("/segments", async (req: Request, res: Response) => {
     }
 
     const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
-    const variantM3u8 = await fetchText(selected.url);
-    const { initUrl, segments } = parseVariantM3u8(variantM3u8);
+    const variantPlaylist = await fetchTextWithUrl(selected.url);
+    const { initUrl, segments } = parseVariantM3u8(
+      variantPlaylist.text,
+      variantPlaylist.url,
+    );
 
     res.json({
       initUrl,
@@ -570,23 +579,29 @@ router.get("/stream-video", async (req: Request, res: Response) => {
     }
 
     // HLS — fetch the playlist and determine if it is a master or variant m3u8
-    const playlistText = await fetchText(m3u8Url);
-    const variants = parseMasterM3u8(playlistText);
+    const playlist = await fetchTextWithUrl(m3u8Url);
+    const variants = parseMasterM3u8(playlist.text, playlist.url);
 
-    let variantPlaylistText: string;
+    let variantPlaylistText = playlist.text;
+    let variantPlaylistUrl = playlist.url;
     if (variants.length > 0) {
       // Master m3u8: pick the requested quality variant
       const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
-      variantPlaylistText = await fetchText(selected.url);
-    } else if (playlistText.includes("#EXTINF:")) {
+      const variantPlaylist = await fetchTextWithUrl(selected.url);
+      variantPlaylistUrl = variantPlaylist.url;
+      variantPlaylistText = variantPlaylist.text;
+    } else if (playlist.text.includes("#EXTINF:")) {
       // Already a variant (media) m3u8 — use it directly
-      variantPlaylistText = playlistText;
+      variantPlaylistText = playlist.text;
     } else {
       res.status(404).json({ error: "Video kalitesi bulunamadı" });
       return;
     }
 
-    const { initUrl, segments } = parseVariantM3u8(variantPlaylistText);
+    const { initUrl, segments } = parseVariantM3u8(
+      variantPlaylistText,
+      variantPlaylistUrl,
+    );
 
     if (segments.length === 0) {
       res.status(404).json({ error: "Video segmentleri bulunamadı" });
@@ -653,57 +668,5 @@ router.get("/subtitle", async (req: Request, res: Response) => {
     res.status(500).json({ error: "Altyazı indirilemedi" });
   }
 });
-
-// --- Helpers ---
-
-function parseMasterM3u8(
-  text: string,
-): { bandwidth: number; url: string; resolution: string }[] {
-  const lines = text.split("\n");
-  const variants: { bandwidth: number; url: string; resolution: string }[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.startsWith("#EXT-X-STREAM-INF:")) {
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      const resMatch = line.match(/RESOLUTION=(\S+)/);
-      const url = lines[i + 1]?.trim();
-      if (url && !url.startsWith("#")) {
-        variants.push({
-          bandwidth: bwMatch ? parseInt(bwMatch[1]!) : 0,
-          url,
-          resolution: resMatch ? resMatch[1]! : "unknown",
-        });
-      }
-    }
-  }
-
-  // Sort highest bandwidth first
-  return variants.sort((a, b) => b.bandwidth - a.bandwidth);
-}
-
-function parseVariantM3u8(text: string): {
-  initUrl: string | null;
-  segments: string[];
-} {
-  const lines = text.split("\n");
-  const segments: string[] = [];
-  let initUrl: string | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (line.startsWith("#EXT-X-MAP:URI=")) {
-      const uriMatch = line.match(/URI="([^"]+)"/);
-      if (uriMatch) initUrl = uriMatch[1]!;
-    } else if (line.startsWith("#EXTINF:")) {
-      const segUrl = lines[i + 1]?.trim();
-      if (segUrl && !segUrl.startsWith("#")) {
-        segments.push(segUrl);
-      }
-    }
-  }
-
-  return { initUrl, segments };
-}
 
 export default router;

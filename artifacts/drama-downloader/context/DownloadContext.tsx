@@ -286,9 +286,14 @@ export function DownloadProvider({ children }: { children: React.ReactNode }) {
         try {
           const errData = await uploadRes.json() as {
             error?: string;
+            details?: string;
             errorCode?: string;
           };
-          if (errData.error) errMsg = errData.error;
+          if (errData.error) {
+            errMsg = errData.details
+              ? `${errData.error}: ${errData.details}`
+              : errData.error;
+          }
           queueStopCode = errData.errorCode;
           stopQueueAfterError = [
             'CF_AUTH',

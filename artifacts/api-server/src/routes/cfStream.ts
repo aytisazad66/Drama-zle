@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { URL } from 'url';
+import { parseMasterM3u8, parseVariantM3u8 } from './hlsUtils';
 
 const router = Router();
 
@@ -11,77 +12,108 @@ const BASE_HEADERS = {
   Origin: 'https://dramadizilerim.com',
 };
 
+const MAX_UPSTREAM_ATTEMPTS = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function proxyFetchResponse(url: string, accept: string): Promise<Response> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < MAX_UPSTREAM_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { ...BASE_HEADERS, Accept: accept },
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (response.ok) return response;
+
+      const error = new Error(`HTTP ${response.status} fetching ${url}`);
+      const retryable =
+        response.status === 408 ||
+        response.status === 425 ||
+        response.status === 429 ||
+        response.status >= 500;
+      if (!retryable || attempt === MAX_UPSTREAM_ATTEMPTS - 1) throw error;
+      lastError = error;
+    } catch (error) {
+      if (attempt === MAX_UPSTREAM_ATTEMPTS - 1) throw error;
+      lastError = error;
+    }
+
+    await sleep(350 * (attempt + 1));
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('HLS upstream request failed');
+}
+
 async function proxyFetchBuffer(url: string): Promise<Buffer> {
-  const res = await fetch(url, { headers: { ...BASE_HEADERS, Accept: '*/*' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  const res = await proxyFetchResponse(url, '*/*');
   return Buffer.from(await res.arrayBuffer());
 }
 
 async function proxyFetchText(url: string): Promise<string> {
-  const res = await fetch(url, { headers: { ...BASE_HEADERS, Accept: '*/*' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  const res = await proxyFetchResponse(url, '*/*');
   return res.text();
 }
 
-function parseMasterM3u8(text: string): { bandwidth: number; url: string }[] {
-  const lines = text.split('\n');
-  const variants: { bandwidth: number; url: string }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.startsWith('#EXT-X-STREAM-INF:')) {
-      const bwMatch = line.match(/BANDWIDTH=(\d+)/);
-      const url = lines[i + 1]?.trim();
-      if (url && !url.startsWith('#')) {
-        variants.push({ bandwidth: bwMatch ? parseInt(bwMatch[1]!) : 0, url });
-      }
-    }
-  }
-  return variants.sort((a, b) => b.bandwidth - a.bandwidth);
-}
-
-function parseVariantM3u8(text: string): { initUrl: string | null; segments: string[] } {
-  const lines = text.split('\n');
-  const segments: string[] = [];
-  let initUrl: string | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (line.startsWith('#EXT-X-MAP:URI=')) {
-      const m = line.match(/URI="([^"]+)"/);
-      if (m) initUrl = m[1]!;
-    } else if (line.startsWith('#EXTINF:')) {
-      const segUrl = lines[i + 1]?.trim();
-      if (segUrl && !segUrl.startsWith('#')) segments.push(segUrl);
-    }
-  }
-  return { initUrl, segments };
+async function proxyFetchPlaylist(
+  url: string,
+): Promise<{ text: string; url: string }> {
+  const response = await proxyFetchResponse(url, '*/*');
+  return { text: await response.text(), url: response.url || url };
 }
 
 /** Download all HLS segments and concatenate into a single MP4 buffer. */
 async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffer> {
-  const masterText = await proxyFetchText(m3u8Url);
-  const variants = parseMasterM3u8(masterText);
+  const masterPlaylist = await proxyFetchPlaylist(m3u8Url);
+  const variants = parseMasterM3u8(masterPlaylist.text, masterPlaylist.url);
 
-  let variantText: string;
+  let variantText = masterPlaylist.text;
+  let variantUrl = masterPlaylist.url;
   if (variants.length > 0) {
     const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
-    variantText = await proxyFetchText(selected.url);
-  } else if (masterText.includes('#EXTINF:')) {
-    variantText = masterText;
+    const variantPlaylist = await proxyFetchPlaylist(selected.url);
+    variantUrl = variantPlaylist.url;
+    variantText = variantPlaylist.text;
+  } else if (masterPlaylist.text.includes('#EXTINF:')) {
+    variantText = masterPlaylist.text;
   } else {
     throw new Error('HLS playlist içinde video segmenti bulunamadı');
   }
 
-  const { initUrl, segments } = parseVariantM3u8(variantText);
+  if (/#EXT-X-KEY:\s*METHOD=(?!NONE\b)/i.test(variantText)) {
+    throw new Error('Şifreli HLS akışı desteklenmiyor');
+  }
+
+  const { initUrl, segments } = parseVariantM3u8(variantText, variantUrl);
+  if (segments.length === 0) {
+    throw new Error('HLS playlist içinde indirilebilir segment bulunamadı');
+  }
+
   const chunks: Buffer[] = [];
 
   if (initUrl) {
-    try { chunks.push(await proxyFetchBuffer(initUrl)); } catch { /* non-fatal */ }
+    try {
+      chunks.push(await proxyFetchBuffer(initUrl));
+    } catch (error) {
+      throw new Error(
+        `HLS başlangıç segmenti alınamadı: ${safeErrorMessage(error)}`,
+      );
+    }
   }
-  for (const segUrl of segments) {
-    try { chunks.push(await proxyFetchBuffer(segUrl)); } catch { /* skip bad segment */ }
+  for (let index = 0; index < segments.length; index++) {
+    try {
+      chunks.push(await proxyFetchBuffer(segments[index]!));
+    } catch (error) {
+      throw new Error(
+        `HLS segmenti ${index + 1}/${segments.length} alınamadı: ${safeErrorMessage(error)}`,
+      );
+    }
   }
 
-  if (chunks.length === 0) throw new Error('Hiç segment indirilemedi');
+  if (chunks.length === 0) throw new Error('Hiç HLS segmenti indirilemedi');
   return Buffer.concat(chunks);
 }
 
@@ -309,11 +341,15 @@ router.post('/cf-upload', async (req, res) => {
     try {
       videoBuffer = await assembleHls(m3u8Url, qualityIndex);
     } catch (err) {
+      const details = safeErrorMessage(err);
       req.log.error(
-        { error: safeErrorMessage(err), sourceHost },
+        { error: details, sourceHost },
         'HLS assembly failed',
       );
-      return res.status(502).json({ error: 'HLS video indirilemedi' });
+      return res.status(502).json({
+        error: 'HLS video indirilemedi',
+        details,
+      });
     }
 
     req.log.info({ bytes: videoBuffer.length, name }, 'HLS assembled, uploading to CF');
