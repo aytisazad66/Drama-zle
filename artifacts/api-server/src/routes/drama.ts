@@ -293,6 +293,85 @@ router.get("/catalog", async (req: Request, res: Response) => {
   }
 });
 
+// --- GET /drama/seasons?url=<series_page_url> ---
+// Lists every season page linked from a series detail page.
+router.get("/seasons", async (req: Request, res: Response) => {
+  const { url } = req.query;
+  if (!url || typeof url !== "string") {
+    res.status(400).json({ error: "url parametresi gerekli" });
+    return;
+  }
+
+  try {
+    const seriesUrl = new URL(url);
+    if (
+      seriesUrl.protocol !== "https:" ||
+      !["dramadizilerim.com", "www.dramadizilerim.com"].includes(
+        seriesUrl.hostname.toLowerCase(),
+      ) ||
+      !/^\/dizi\/[^/]+\/?$/.test(seriesUrl.pathname)
+    ) {
+      res.status(400).json({ error: "Geçerli bir dizi sayfası gerekli" });
+      return;
+    }
+
+    const slug = seriesUrl.pathname.split("/").filter(Boolean).at(-1);
+    if (!slug) {
+      res.status(400).json({ error: "Dizi bağlantısı tanınamadı" });
+      return;
+    }
+
+    const html = await fetchHtml(seriesUrl.toString(), `${DRAMA_ORIGIN}/dizi`);
+    const seasonPages = new Map<string, string>();
+    const anchorRegex = /<a\b([^>]*)>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = anchorRegex.exec(html)) !== null) {
+      const href = readHtmlAttribute(match[1] ?? "", "href");
+      if (!href) continue;
+
+      try {
+        const candidate = new URL(href, DRAMA_ORIGIN);
+        if (
+          !["dramadizilerim.com", "www.dramadizilerim.com"].includes(
+            candidate.hostname.toLowerCase(),
+          ) ||
+          candidate.pathname.replace(/\/$/, "") !== `/izle/${slug}`
+        ) {
+          continue;
+        }
+        const season = candidate.searchParams.get("s") ?? "1";
+        if (!/^\d+$/.test(season)) continue;
+        candidate.searchParams.set("s", season);
+        candidate.searchParams.set("e", "1");
+        seasonPages.set(
+          season,
+          new URL(`/izle/${slug}?${candidate.searchParams.toString()}`, DRAMA_ORIGIN).toString(),
+        );
+      } catch {
+        // Ignore malformed season links.
+      }
+    }
+
+    if (seasonPages.size === 0) {
+      const firstEpisode = findFirstEpisodeUrl(html);
+      const season = firstEpisode?.searchParams.get("s") ?? "1";
+      const fallback = new URL(`/izle/${slug}`, DRAMA_ORIGIN);
+      fallback.searchParams.set("s", season);
+      fallback.searchParams.set("e", "1");
+      seasonPages.set(season, fallback.toString());
+    }
+
+    res.json({
+      seasons: [...seasonPages.entries()]
+        .sort(([a], [b]) => Number(a) - Number(b))
+        .map(([season, episodeUrl]) => ({ season, episodeUrl })),
+    });
+  } catch (err) {
+    req.log.error({ err }, "season list fetch failed");
+    res.status(502).json({ error: "Dizi sezonları şu anda alınamıyor" });
+  }
+});
+
 // --- GET /drama/extract?url=<episode_page_url> ---
 // Returns list of all episodes (token + episode number) from the season page
 router.get("/extract", async (req: Request, res: Response) => {

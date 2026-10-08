@@ -125,7 +125,13 @@ async function setCfMeta(
   accountId: string,
   token: string,
   uid: string,
-  fields: { name?: string; creator?: string; episodeNum?: number; season?: string },
+  fields: {
+    name?: string;
+    creator?: string;
+    episodeNum?: number;
+    season?: string;
+    automationKey?: string;
+  },
 ): Promise<void> {
   const body: Record<string, unknown> = {};
   if (fields.creator) body.creator = fields.creator;
@@ -134,6 +140,7 @@ async function setCfMeta(
     ...(fields.name && { name: fields.name }),
     ...(fields.episodeNum !== undefined && { episode: String(fields.episodeNum) }),
     ...(fields.season !== undefined && { season: fields.season }),
+    ...(fields.automationKey && { automationKey: fields.automationKey }),
   };
 
   const res = await fetch(
@@ -270,8 +277,8 @@ function safeErrorMessage(error: unknown): string {
  * - HLS: buffers all segments on our server → direct multipart upload to CF
  *   (copy-from-URL fails for HLS because CF can't determine stream size from
  *   our chunked endpoint).
- * - MP4: copy-from-URL (CF fetches from our stream-video proxy which passes
- *   Content-Length from the upstream server).
+ * - MP4: copy-from-URL for the mobile app; automation can use direct server-side
+ *   proxying when the source requires request headers.
  *
  * Body fields:
  *   videoUrl   — our /stream-video proxy URL
@@ -280,13 +287,16 @@ function safeErrorMessage(error: unknown): string {
  *   subtitleUrl — (optional) direct SRT/VTT URL; uploaded as Turkish caption
  */
 router.post('/cf-upload', async (req, res) => {
-  const { videoUrl, name, creator, subtitleUrl, episodeNum, season } = req.body as {
+  const { videoUrl, name, creator, subtitleUrl, episodeNum, season, automationKey, directSource, videoType: requestedVideoType } = req.body as {
     videoUrl?: string;
     name?: string;
     creator?: string;
     subtitleUrl?: string;
     episodeNum?: number;
     season?: string;
+    automationKey?: string;
+    directSource?: boolean;
+    videoType?: "hls" | "mp4";
   };
 
   if (!videoUrl || !name) {
@@ -304,16 +314,22 @@ router.post('/cf-upload', async (req, res) => {
   let videoType: string = 'mp4';
   let qualityIndex = 1;
 
-  try {
-    const parsed = new URL(videoUrl);
-    m3u8Url = parsed.searchParams.get('m3u8Url') ?? videoUrl;
-    videoType = parsed.searchParams.get('videoType') ?? 'mp4';
-    qualityIndex = parseInt(parsed.searchParams.get('quality') ?? '1') || 1;
-  } catch {
-    // videoUrl is already a direct URL — use as-is
+  if (directSource) {
+    m3u8Url = videoUrl;
+    videoType = requestedVideoType ?? (videoUrl.includes(".m3u8") ? "hls" : "mp4");
+  } else {
+    try {
+      const parsed = new URL(videoUrl);
+      m3u8Url = parsed.searchParams.get('m3u8Url') ?? videoUrl;
+      videoType = parsed.searchParams.get('videoType') ?? 'mp4';
+      qualityIndex = parseInt(parsed.searchParams.get('quality') ?? '1') || 1;
+    } catch {
+      // videoUrl is already a direct URL — use as-is
+    }
   }
 
   const isHls = videoType === 'hls' || m3u8Url.includes('.m3u8');
+  const serverProxySource = directSource === true;
 
   // Helper: upload caption after we have the uid, non-fatal
   async function maybeUploadCaption(uid: string) {
@@ -327,7 +343,7 @@ router.post('/cf-upload', async (req, res) => {
   }
 
   // ── HLS: assemble segments locally, direct multipart upload ────────────────
-  if (isHls) {
+  if (isHls || serverProxySource) {
     const sourceHost = (() => {
       try {
         return new URL(m3u8Url).host;
@@ -335,19 +351,24 @@ router.post('/cf-upload', async (req, res) => {
         return undefined;
       }
     })();
-    req.log.info({ sourceHost, qualityIndex, name }, 'CF upload: assembling HLS');
+    req.log.info(
+      { sourceHost, qualityIndex, name, isHls },
+      isHls ? 'CF upload: assembling HLS' : 'CF upload: proxying MP4 source',
+    );
 
     let videoBuffer: Buffer;
     try {
-      videoBuffer = await assembleHls(m3u8Url, qualityIndex);
+      videoBuffer = isHls
+        ? await assembleHls(m3u8Url, qualityIndex)
+        : await proxyFetchBuffer(m3u8Url);
     } catch (err) {
       const details = safeErrorMessage(err);
       req.log.error(
         { error: details, sourceHost },
-        'HLS assembly failed',
+        isHls ? 'HLS assembly failed' : 'MP4 source fetch failed',
       );
       return res.status(502).json({
-        error: 'HLS video indirilemedi',
+        error: isHls ? 'HLS video indirilemedi' : 'MP4 video indirilemedi',
         details,
       });
     }
@@ -384,14 +405,14 @@ router.post('/cf-upload', async (req, res) => {
 
     const result = parseCfResult(data);
     if (creator) {
-      try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season }); }
+      try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season, automationKey }); }
       catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
     }
     await maybeUploadCaption(result.uid);
     return res.json(result);
   }
 
-  // ── MP4: copy-from-URL (CF fetches from our proxy, Content-Length intact) ──
+  // ── MP4: copy-from-URL (CF fetches from our stream-video proxy) ──
   req.log.info({ name }, 'CF upload: copy-from-URL (MP4)');
 
   const cfRes = await fetch(
@@ -416,7 +437,7 @@ router.post('/cf-upload', async (req, res) => {
 
   const result = parseCfResult(data);
   if (creator) {
-    try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season }); }
+    try { await setCfMeta(accountId!, token!, result.uid, { name, creator, episodeNum, season, automationKey }); }
     catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
   }
   await maybeUploadCaption(result.uid);

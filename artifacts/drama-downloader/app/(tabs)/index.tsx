@@ -16,6 +16,7 @@ import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollV
 import { useColors } from '@/hooks/useColors';
 import { useDownloads } from '@/context/DownloadContext';
 import {
+  useGetDramaAutomationStatus,
   getGetDramaCatalogQueryKey,
   useGetDramaCatalog,
   type DramaCatalogItem,
@@ -77,6 +78,13 @@ export default function HomeScreen() {
       },
     },
   );
+  const automationQuery = useGetDramaAutomationStatus({
+    query: {
+      refetchInterval: 15_000,
+      retry: 1,
+    },
+  });
+  const automation = automationQuery.data;
 
   useEffect(() => {
     const pageData = catalogQuery.data;
@@ -227,6 +235,58 @@ export default function HomeScreen() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
+        <View
+          style={[
+            styles.automationCard,
+            { backgroundColor: colors.card, borderColor: colors.border },
+          ]}
+          accessibilityLabel="Otonom yükleme durumu"
+        >
+          <View style={styles.automationHeading}>
+            <Feather
+              name={automation?.enabled ? 'zap' : 'clock'}
+              size={17}
+              color={automation?.enabled ? colors.success : colors.mutedForeground}
+            />
+            <Text style={[styles.automationTitle, { color: colors.foreground }]}>
+              Otonom yükleme
+            </Text>
+            <Text
+              style={[
+                styles.automationBadge,
+                {
+                  color: automation?.enabled ? colors.success : colors.mutedForeground,
+                  backgroundColor: automation?.enabled
+                    ? `${colors.success}22`
+                    : colors.secondary,
+                },
+              ]}
+            >
+              {automation?.enabled ? 'Etkin' : 'Yayında başlar'}
+            </Text>
+          </View>
+          <Text style={[styles.automationCaption, { color: colors.mutedForeground }]}>
+            {automation?.currentSeriesTitle
+              ? `${automation.currentSeriesTitle} · Sezon ${automation.currentSeason} · Bölüm ${automation.currentEpisode} yükleniyor`
+              : automation?.phase === 'scanning'
+              ? 'Dizi kataloğu taranıyor...'
+              : automation?.enabled
+              ? 'Sıradaki yeni bölüm bekleniyor.'
+              : 'Sunucu yayımlandığında katalog arka planda taranır.'}
+          </Text>
+          {automation && (
+            <Text style={[styles.automationTotals, { color: colors.mutedForeground }]}>
+              {automation.done} tamamlandı · {automation.pending + automation.processing} sırada
+              {automation.failed > 0 ? ` · ${automation.failed} hata` : ''}
+            </Text>
+          )}
+          {automation?.lastError && (
+            <Text style={[styles.automationError, { color: colors.destructive }]}>
+              Son hata: {automation.lastError}
+            </Text>
+          )}
+        </View>
+
         {!series && (
           <>
             <View
@@ -596,6 +656,42 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  automationCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+    gap: 7,
+    marginBottom: 14,
+  },
+  automationHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  automationTitle: {
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+    flex: 1,
+  },
+  automationBadge: {
+    fontSize: 11,
+    fontFamily: 'Inter_600SemiBold',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  automationCaption: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+  },
+  automationTotals: {
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
+  },
+  automationError: {
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

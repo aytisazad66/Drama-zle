@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { startDramaAutomation } from "./services/dramaAutomation";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,10 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  void startDramaAutomation().catch((error) => {
+    logger.error(
+      { message: error instanceof Error ? error.message : "startup failed" },
+      "Drama automation could not start",
+    );
+  });
 });

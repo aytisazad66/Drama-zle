@@ -54,6 +54,56 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /drama/seasons:
+    get:
+      operationId: getDramaSeasons
+      tags: [drama]
+      summary: List every season page for a series
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+      responses:
+        "200":
+          description: Season URLs available for the series.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DramaSeasonList"
+        "400":
+          description: Invalid series URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: The series page could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /drama/automation/status:
+    get:
+      operationId: getDramaAutomationStatus
+      tags: [drama]
+      summary: Get automatic upload progress
+      description: Returns server-side catalog scanning and Cloudflare upload progress.
+      responses:
+        "200":
+          description: Current automation status and queue totals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DramaAutomationStatus"
+        "503":
+          description: Automation status is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /healthz:
     get:
       operationId: healthCheck
@@ -97,6 +147,26 @@ components:
         - items
         - page
         - hasMore
+    DramaSeason:
+      type: object
+      properties:
+        season:
+          type: string
+        episodeUrl:
+          type: string
+          format: uri
+      required:
+        - season
+        - episodeUrl
+    DramaSeasonList:
+      type: object
+      properties:
+        seasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/DramaSeason"
+      required:
+        - seasons
     ErrorResponse:
       type: object
       properties:
@@ -111,4 +181,42 @@ components:
           type: string
       required:
         - status
+    DramaAutomationStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        phase:
+          type: string
+          enum: [disabled, starting, scanning, uploading, idle, error]
+        currentSeriesTitle:
+          type: ["string", "null"]
+        currentSeason:
+          type: ["string", "null"]
+        currentEpisode:
+          type: ["integer", "null"]
+        lastScanAt:
+          type: ["string", "null"]
+        lastError:
+          type: ["string", "null"]
+        pending:
+          type: integer
+        processing:
+          type: integer
+        done:
+          type: integer
+        failed:
+          type: integer
+      required:
+        - enabled
+        - phase
+        - currentSeriesTitle
+        - currentSeason
+        - currentEpisode
+        - lastScanAt
+        - lastError
+        - pending
+        - processing
+        - done
+        - failed
 
