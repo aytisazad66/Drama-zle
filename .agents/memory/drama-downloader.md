@@ -54,3 +54,11 @@ The Cloudflare Stream URL-copy upload endpoint requires the API token permission
 **Why:** Cloudflare rejects the upload request with HTTP 401 when the configured token is not accepted; the official endpoint documents `Stream Write` as an accepted permission.
 
 **How to apply:** When setting `CF_STREAM_TOKEN`, use a token scoped to the same account as `CF_ACCOUNT_ID` and grant `Stream Write`.
+
+## User-owned source and destination
+
+The user stated that they own both the drama site and the Cloudflare account used by this project.
+
+**Why:** The user explicitly confirmed ownership after being asked.
+
+**How to apply:** Do not ask the user to prove ownership again; keep ownership separate from any other constraints on implementation.
