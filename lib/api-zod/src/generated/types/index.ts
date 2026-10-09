@@ -6,8 +6,13 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './dramaAutomationStatus';
+export * from './dramaAutomationStatusPhase';
 export * from './dramaCatalogItem';
 export * from './dramaCatalogPage';
+export * from './dramaSeason';
+export * from './dramaSeasonList';
 export * from './errorResponse';
 export * from './getDramaCatalogParams';
+export * from './getDramaSeasonsParams';
 export * from './healthStatus';

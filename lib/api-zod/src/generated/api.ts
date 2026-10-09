@@ -35,6 +35,40 @@ export const GetDramaCatalogResponse = zod.object({
 
 
 /**
+ * @summary List every season page for a series
+ */
+export const GetDramaSeasonsQueryParams = zod.object({
+  "url": zod.coerce.string().url()
+})
+
+export const GetDramaSeasonsResponse = zod.object({
+  "seasons": zod.array(zod.object({
+  "season": zod.string(),
+  "episodeUrl": zod.string().url()
+}))
+})
+
+
+/**
+ * Returns server-side catalog scanning and Cloudflare upload progress.
+ * @summary Get automatic upload progress
+ */
+export const GetDramaAutomationStatusResponse = zod.object({
+  "enabled": zod.boolean(),
+  "phase": zod.enum(['disabled', 'starting', 'scanning', 'uploading', 'idle', 'error']),
+  "currentSeriesTitle": zod.string().nullable(),
+  "currentSeason": zod.string().nullable(),
+  "currentEpisode": zod.number().nullable(),
+  "lastScanAt": zod.string().nullable(),
+  "lastError": zod.string().nullable(),
+  "pending": zod.number(),
+  "processing": zod.number(),
+  "done": zod.number(),
+  "failed": zod.number()
+})
+
+
+/**
  * Returns server health status
  * @summary Health check
  */

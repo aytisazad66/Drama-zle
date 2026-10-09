@@ -16,9 +16,12 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  DramaAutomationStatus,
   DramaCatalogPage,
+  DramaSeasonList,
   ErrorResponse,
   GetDramaCatalogParams,
+  GetDramaSeasonsParams,
   HealthStatus
 } from './api.schemas';
 
@@ -122,6 +125,168 @@ export function useGetDramaCatalog<TData = Awaited<ReturnType<typeof getDramaCat
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetDramaCatalogQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetDramaSeasonsUrl = (params: GetDramaSeasonsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/drama/seasons?${stringifiedParams}` : `/api/drama/seasons`
+}
+
+/**
+ * @summary List every season page for a series
+ */
+export const getDramaSeasons = async (params: GetDramaSeasonsParams, options?: RequestInit): Promise<DramaSeasonList> => {
+
+  return customFetch<DramaSeasonList>(getGetDramaSeasonsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDramaSeasonsQueryKey = (params?: GetDramaSeasonsParams,) => {
+    return [
+    `/api/drama/seasons`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetDramaSeasonsQueryOptions = <TData = Awaited<ReturnType<typeof getDramaSeasons>>, TError = ErrorType<ErrorResponse>>(params: GetDramaSeasonsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDramaSeasons>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDramaSeasonsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDramaSeasons>>> = ({ signal }) => getDramaSeasons(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDramaSeasons>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetDramaSeasonsQueryResult = NonNullable<Awaited<ReturnType<typeof getDramaSeasons>>>
+export type GetDramaSeasonsQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary List every season page for a series
+ */
+
+export function useGetDramaSeasons<TData = Awaited<ReturnType<typeof getDramaSeasons>>, TError = ErrorType<ErrorResponse>>(
+ params: GetDramaSeasonsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDramaSeasons>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetDramaSeasonsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetDramaAutomationStatusUrl = () => {
+
+
+
+
+  return `/api/drama/automation/status`
+}
+
+/**
+ * Returns server-side catalog scanning and Cloudflare upload progress.
+ * @summary Get automatic upload progress
+ */
+export const getDramaAutomationStatus = async ( options?: RequestInit): Promise<DramaAutomationStatus> => {
+
+  return customFetch<DramaAutomationStatus>(getGetDramaAutomationStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDramaAutomationStatusQueryKey = () => {
+    return [
+    `/api/drama/automation/status`
+    ] as const;
+    }
+
+
+export const getGetDramaAutomationStatusQueryOptions = <TData = Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDramaAutomationStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDramaAutomationStatus>>> = ({ signal }) => getDramaAutomationStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetDramaAutomationStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getDramaAutomationStatus>>>
+export type GetDramaAutomationStatusQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Get automatic upload progress
+ */
+
+export function useGetDramaAutomationStatus<TData = Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetDramaAutomationStatusQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

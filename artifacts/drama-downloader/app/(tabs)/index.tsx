@@ -17,6 +17,7 @@ import { useColors } from '@/hooks/useColors';
 import { useDownloads } from '@/context/DownloadContext';
 import {
   useGetDramaAutomationStatus,
+  getGetDramaAutomationStatusQueryKey,
   getGetDramaCatalogQueryKey,
   useGetDramaCatalog,
   type DramaCatalogItem,
@@ -80,6 +81,7 @@ export default function HomeScreen() {
   );
   const automationQuery = useGetDramaAutomationStatus({
     query: {
+      queryKey: getGetDramaAutomationStatusQueryKey(),
       refetchInterval: 15_000,
       retry: 1,
     },

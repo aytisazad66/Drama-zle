@@ -18,12 +18,52 @@ export interface DramaCatalogPage {
   hasMore: boolean;
 }
 
+export interface DramaSeason {
+  season: string;
+  episodeUrl: string;
+}
+
+export interface DramaSeasonList {
+  seasons: DramaSeason[];
+}
+
 export interface ErrorResponse {
   error: string;
 }
 
 export interface HealthStatus {
   status: string;
+}
+
+export type DramaAutomationStatusPhase = typeof DramaAutomationStatusPhase[keyof typeof DramaAutomationStatusPhase];
+
+
+export const DramaAutomationStatusPhase = {
+  disabled: 'disabled',
+  starting: 'starting',
+  scanning: 'scanning',
+  uploading: 'uploading',
+  idle: 'idle',
+  error: 'error',
+} as const;
+
+export interface DramaAutomationStatus {
+  enabled: boolean;
+  phase: DramaAutomationStatusPhase;
+  /** @nullable */
+  currentSeriesTitle: string | null;
+  /** @nullable */
+  currentSeason: string | null;
+  /** @nullable */
+  currentEpisode: number | null;
+  /** @nullable */
+  lastScanAt: string | null;
+  /** @nullable */
+  lastError: string | null;
+  pending: number;
+  processing: number;
+  done: number;
+  failed: number;
 }
 
 export type GetDramaCatalogParams = {
@@ -38,5 +78,9 @@ q?: string;
  * @maximum 500
  */
 page?: number;
+};
+
+export type GetDramaSeasonsParams = {
+url: string;
 };
 
