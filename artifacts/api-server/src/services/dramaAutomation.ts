@@ -96,6 +96,7 @@ let scanPage = 1;
 let scanComplete = false;
 let lastScanCompletedAt = 0;
 let nextScanAttemptAt = 0;
+let automationLoop: Promise<void> | null = null;
 const failedSeriesScans = new Map<
   string,
   { title: string; url: string; attempts: number; nextAttemptAt: number }
@@ -551,22 +552,18 @@ export async function startDramaAutomation(): Promise<void> {
   snapshot.phase = "starting";
   logger.info("Drama automation worker started");
 
-  process.once("SIGTERM", () => {
-    stopped = true;
-    void lockClient.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID])
-      .finally(() => lockClient.release());
-  });
-  process.once("SIGINT", () => {
-    stopped = true;
-    void lockClient.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID])
-      .finally(() => lockClient.release());
-  });
-
-  void runLoop().finally(() => {
+  automationLoop = runLoop().finally(async () => {
     snapshot.phase = "disabled";
-    void lockClient.query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID])
-      .finally(() => lockClient.release());
+    await lockClient
+      .query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID])
+      .catch(() => {});
+    lockClient.release();
   });
+}
+
+export async function stopDramaAutomation(): Promise<void> {
+  stopped = true;
+  await automationLoop;
 }
 
 export async function getDramaAutomationStatus() {
