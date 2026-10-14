@@ -62,3 +62,11 @@ The user stated that they own both the drama site and the Cloudflare account use
 **Why:** The user explicitly confirmed ownership after being asked.
 
 **How to apply:** Do not ask the user to prove ownership again; keep ownership separate from any other constraints on implementation.
+
+## Manual Cloudflare upload control
+
+The user wants automated Cloudflare Stream uploads to start only when they press Start, stop when they press Stop, and keep a visible list of uploaded series names.
+
+**Why:** The user explicitly requested manual control and a recorded series-name list.
+
+**How to apply:** Do not auto-start the upload worker; preserve retryable episodes when stopping, and include successful uploads in the visible series history.

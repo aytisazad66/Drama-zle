@@ -14,6 +14,8 @@ export const DramaAutomationStatusPhase = {
   starting: 'starting',
   scanning: 'scanning',
   uploading: 'uploading',
+  stopping: 'stopping',
+  paused: 'paused',
   idle: 'idle',
   error: 'error',
 } as const;

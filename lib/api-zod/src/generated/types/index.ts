@@ -12,6 +12,7 @@ export * from './dramaCatalogItem';
 export * from './dramaCatalogPage';
 export * from './dramaSeason';
 export * from './dramaSeasonList';
+export * from './dramaUploadedSeries';
 export * from './errorResponse';
 export * from './getDramaCatalogParams';
 export * from './getDramaSeasonsParams';

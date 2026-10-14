@@ -50,12 +50,12 @@ export const GetDramaSeasonsResponse = zod.object({
 
 
 /**
- * Returns server-side catalog scanning and Cloudflare upload progress.
- * @summary Get automatic upload progress
+ * Returns manual catalog scanning and upload progress, plus series already uploaded.
+ * @summary Get Cloudflare Stream upload status
  */
 export const GetDramaAutomationStatusResponse = zod.object({
   "enabled": zod.boolean(),
-  "phase": zod.enum(['disabled', 'starting', 'scanning', 'uploading', 'idle', 'error']),
+  "phase": zod.enum(['disabled', 'starting', 'scanning', 'uploading', 'stopping', 'paused', 'idle', 'error']),
   "currentSeriesTitle": zod.string().nullable(),
   "currentSeason": zod.string().nullable(),
   "currentEpisode": zod.number().nullable(),
@@ -64,7 +64,59 @@ export const GetDramaAutomationStatusResponse = zod.object({
   "pending": zod.number(),
   "processing": zod.number(),
   "done": zod.number(),
-  "failed": zod.number()
+  "failed": zod.number(),
+  "uploadedSeries": zod.array(zod.object({
+  "slug": zod.string(),
+  "title": zod.string(),
+  "lastUploadedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Start background Cloudflare Stream uploads
+ */
+export const StartDramaAutomationResponse = zod.object({
+  "enabled": zod.boolean(),
+  "phase": zod.enum(['disabled', 'starting', 'scanning', 'uploading', 'stopping', 'paused', 'idle', 'error']),
+  "currentSeriesTitle": zod.string().nullable(),
+  "currentSeason": zod.string().nullable(),
+  "currentEpisode": zod.number().nullable(),
+  "lastScanAt": zod.string().nullable(),
+  "lastError": zod.string().nullable(),
+  "pending": zod.number(),
+  "processing": zod.number(),
+  "done": zod.number(),
+  "failed": zod.number(),
+  "uploadedSeries": zod.array(zod.object({
+  "slug": zod.string(),
+  "title": zod.string(),
+  "lastUploadedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * Stops new work and cancels active uploads; interrupted episodes remain retryable.
+ * @summary Stop background Cloudflare Stream uploads
+ */
+export const StopDramaAutomationResponse = zod.object({
+  "enabled": zod.boolean(),
+  "phase": zod.enum(['disabled', 'starting', 'scanning', 'uploading', 'stopping', 'paused', 'idle', 'error']),
+  "currentSeriesTitle": zod.string().nullable(),
+  "currentSeason": zod.string().nullable(),
+  "currentEpisode": zod.number().nullable(),
+  "lastScanAt": zod.string().nullable(),
+  "lastError": zod.string().nullable(),
+  "pending": zod.number(),
+  "processing": zod.number(),
+  "done": zod.number(),
+  "failed": zod.number(),
+  "uploadedSeries": zod.array(zod.object({
+  "slug": zod.string(),
+  "title": zod.string(),
+  "lastUploadedAt": zod.coerce.date()
+}))
 })
 
 

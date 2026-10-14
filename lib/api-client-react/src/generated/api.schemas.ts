@@ -43,9 +43,17 @@ export const DramaAutomationStatusPhase = {
   starting: 'starting',
   scanning: 'scanning',
   uploading: 'uploading',
+  stopping: 'stopping',
+  paused: 'paused',
   idle: 'idle',
   error: 'error',
 } as const;
+
+export interface DramaUploadedSeries {
+  slug: string;
+  title: string;
+  lastUploadedAt: string;
+}
 
 export interface DramaAutomationStatus {
   enabled: boolean;
@@ -64,6 +72,7 @@ export interface DramaAutomationStatus {
   processing: number;
   done: number;
   failed: number;
+  uploadedSeries: DramaUploadedSeries[];
 }
 
 export type GetDramaCatalogParams = {

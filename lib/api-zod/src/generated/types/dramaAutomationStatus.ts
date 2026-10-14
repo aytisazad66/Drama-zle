@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { DramaAutomationStatusPhase } from './dramaAutomationStatusPhase';
+import type { DramaUploadedSeries } from './dramaUploadedSeries';
 
 export interface DramaAutomationStatus {
   enabled: boolean;
@@ -24,4 +25,5 @@ export interface DramaAutomationStatus {
   processing: number;
   done: number;
   failed: number;
+  uploadedSeries: DramaUploadedSeries[];
 }

@@ -1,10 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { pool } from "@workspace/db";
-import {
-  startDramaAutomation,
-  stopDramaAutomation,
-} from "./services/dramaAutomation";
+import { stopDramaAutomation } from "./services/dramaAutomation";
 
 const rawPort = process.env["PORT"];
 
@@ -27,12 +24,6 @@ const server = app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
-  void startDramaAutomation().catch((error) => {
-    logger.error(
-      { message: error instanceof Error ? error.message : "startup failed" },
-      "Drama automation could not start",
-    );
-  });
 });
 
 let shuttingDown = false;
@@ -41,7 +32,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   logger.info({ signal }, "Graceful shutdown started");
 
-  await stopDramaAutomation();
+  await stopDramaAutomation(true);
   await new Promise<void>((resolve) => {
     server.close((error) => {
       if (error) logger.error({ err: error }, "HTTP server shutdown failed");

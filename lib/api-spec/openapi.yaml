@@ -89,8 +89,8 @@ paths:
     get:
       operationId: getDramaAutomationStatus
       tags: [drama]
-      summary: Get automatic upload progress
-      description: Returns server-side catalog scanning and Cloudflare upload progress.
+      summary: Get Cloudflare Stream upload status
+      description: Returns manual catalog scanning and upload progress, plus series already uploaded.
       responses:
         "200":
           description: Current automation status and queue totals.
@@ -100,6 +100,43 @@ paths:
                 $ref: "#/components/schemas/DramaAutomationStatus"
         "503":
           description: Automation status is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /drama/automation/start:
+    post:
+      operationId: startDramaAutomation
+      tags: [drama]
+      summary: Start background Cloudflare Stream uploads
+      responses:
+        "200":
+          description: The upload worker was started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DramaAutomationStatus"
+        "503":
+          description: Upload worker could not be started or Cloudflare is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /drama/automation/stop:
+    post:
+      operationId: stopDramaAutomation
+      tags: [drama]
+      summary: Stop background Cloudflare Stream uploads
+      description: Stops new work and cancels active uploads; interrupted episodes remain retryable.
+      responses:
+        "200":
+          description: The upload worker was stopped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DramaAutomationStatus"
+        "503":
+          description: Upload worker could not be stopped.
           content:
             application/json:
               schema:
@@ -188,7 +225,7 @@ components:
           type: boolean
         phase:
           type: string
-          enum: [disabled, starting, scanning, uploading, idle, error]
+          enum: [disabled, starting, scanning, uploading, stopping, paused, idle, error]
         currentSeriesTitle:
           type: ["string", "null"]
         currentSeason:
@@ -207,6 +244,10 @@ components:
           type: integer
         failed:
           type: integer
+        uploadedSeries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DramaUploadedSeries"
       required:
         - enabled
         - phase
@@ -219,4 +260,19 @@ components:
         - processing
         - done
         - failed
+        - uploadedSeries
+    DramaUploadedSeries:
+      type: object
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        lastUploadedAt:
+          type: string
+          format: date-time
+      required:
+        - slug
+        - title
+        - lastUploadedAt
 

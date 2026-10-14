@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useQueryClient } from '@tanstack/react-query';
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
@@ -20,6 +21,9 @@ import {
   getGetDramaAutomationStatusQueryKey,
   getGetDramaCatalogQueryKey,
   useGetDramaCatalog,
+  useStartDramaAutomation,
+  useStopDramaAutomation,
+  type DramaAutomationStatus,
   type DramaCatalogItem,
 } from '@workspace/api-client-react';
 
@@ -52,6 +56,7 @@ function getApiBase(): string {
 export default function HomeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const queryClient = useQueryClient();
   const { addEpisodes, downloads } = useDownloads();
 
   const [url, setUrl] = useState('');
@@ -62,6 +67,7 @@ export default function HomeScreen() {
   const [manualUrlOpen, setManualUrlOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [automationControlError, setAutomationControlError] = useState<string | null>(null);
   const [series, setSeries] = useState<SeriesInfo | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
@@ -87,6 +93,48 @@ export default function HomeScreen() {
     },
   });
   const automation = automationQuery.data;
+  const refreshAutomationStatus = async (status: DramaAutomationStatus) => {
+    queryClient.setQueryData(getGetDramaAutomationStatusQueryKey(), status);
+    await queryClient.invalidateQueries({
+      queryKey: getGetDramaAutomationStatusQueryKey(),
+    });
+  };
+  const startAutomationMutation = useStartDramaAutomation({
+    mutation: {
+      onSuccess: refreshAutomationStatus,
+      onError: (controlError) => {
+        setAutomationControlError(
+          controlError instanceof Error
+            ? controlError.message
+            : 'Cloudflare Stream yüklemesi başlatılamadı.',
+        );
+      },
+    },
+  });
+  const stopAutomationMutation = useStopDramaAutomation({
+    mutation: {
+      onSuccess: refreshAutomationStatus,
+      onError: (controlError) => {
+        setAutomationControlError(
+          controlError instanceof Error
+            ? controlError.message
+            : 'Cloudflare Stream yüklemesi durdurulamadı.',
+        );
+      },
+    },
+  });
+  const automationControlPending =
+    startAutomationMutation.isPending || stopAutomationMutation.isPending;
+  const automationStopping = automation?.phase === 'stopping';
+
+  const handleAutomationToggle = useCallback(() => {
+    setAutomationControlError(null);
+    if (automation?.enabled) {
+      stopAutomationMutation.mutate();
+    } else {
+      startAutomationMutation.mutate();
+    }
+  }, [automation?.enabled, startAutomationMutation, stopAutomationMutation]);
 
   useEffect(() => {
     const pageData = catalogQuery.data;
@@ -264,17 +312,23 @@ export default function HomeScreen() {
                 },
               ]}
             >
-              {automation?.enabled ? 'Etkin' : 'Yayında başlar'}
+              {automation?.enabled
+                ? 'Çalışıyor'
+                : automationStopping
+                ? 'Durduruluyor'
+                : 'Duraklatıldı'}
             </Text>
           </View>
           <Text style={[styles.automationCaption, { color: colors.mutedForeground }]}>
-            {automation?.currentSeriesTitle
+            {automationStopping
+              ? 'Devam eden aktarım iptal ediliyor...'
+              : automation?.currentSeriesTitle
               ? `${automation.currentSeriesTitle} · Sezon ${automation.currentSeason} · Bölüm ${automation.currentEpisode} yükleniyor`
               : automation?.phase === 'scanning'
               ? 'Dizi kataloğu taranıyor...'
               : automation?.enabled
               ? 'Sıradaki yeni bölüm bekleniyor.'
-              : 'Sunucu yayımlandığında katalog arka planda taranır.'}
+              : 'Cloudflare Stream yüklemesini başlatmak için düğmeye dokunun.'}
           </Text>
           {automation && (
             <Text style={[styles.automationTotals, { color: colors.mutedForeground }]}>
@@ -285,6 +339,106 @@ export default function HomeScreen() {
           {automation?.lastError && (
             <Text style={[styles.automationError, { color: colors.destructive }]}>
               Son hata: {automation.lastError}
+            </Text>
+          )}
+          <TouchableOpacity
+            style={[
+              styles.automationControlButton,
+              {
+                backgroundColor: automation?.enabled
+                  ? colors.destructive
+                  : colors.primary,
+                opacity:
+                  automationQuery.isLoading ||
+                  automationControlPending ||
+                  automationStopping
+                    ? 0.65
+                    : 1,
+              },
+            ]}
+            onPress={handleAutomationToggle}
+            disabled={
+              automationQuery.isLoading ||
+              automationControlPending ||
+              automationStopping
+            }
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel={
+              automation?.enabled
+                ? 'Cloudflare Stream yüklemesini durdur'
+                : 'Cloudflare Stream yüklemesini başlat'
+            }
+            testID={automation?.enabled ? 'stop-stream-uploads' : 'start-stream-uploads'}
+          >
+            {automationControlPending ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Feather
+                name={automation?.enabled ? 'square' : 'play'}
+                size={16}
+                color="#fff"
+              />
+            )}
+            <Text style={styles.automationControlText}>
+              {automationStopping
+                ? 'Durduruluyor...'
+                : automationControlPending
+                ? 'İşleniyor...'
+                : automation?.enabled
+                ? 'Yüklemeyi Durdur'
+                : 'Yüklemeyi Başlat'}
+            </Text>
+          </TouchableOpacity>
+          {automationControlError && (
+            <Text style={[styles.automationError, { color: colors.destructive }]}>
+              {automationControlError}
+            </Text>
+          )}
+        </View>
+
+        <View
+          style={[
+            styles.uploadedSeriesCard,
+            { backgroundColor: colors.card, borderColor: colors.border },
+          ]}
+          accessibilityLabel="Cloudflare Stream'e yüklenen diziler"
+        >
+          <View style={styles.uploadedSeriesHeading}>
+            <Feather name="film" size={17} color={colors.primary} />
+            <Text style={[styles.uploadedSeriesTitle, { color: colors.foreground }]}>
+              Stream’e yüklenen diziler
+            </Text>
+            {automation?.uploadedSeries.length ? (
+              <Text style={[styles.uploadedSeriesCount, { color: colors.mutedForeground }]}>
+                {automation.uploadedSeries.length}
+              </Text>
+            ) : null}
+          </View>
+          {automationQuery.isLoading ? (
+            <ActivityIndicator color={colors.primary} size="small" />
+          ) : automationQuery.isError ? (
+            <Text style={[styles.uploadedSeriesEmpty, { color: colors.mutedForeground }]}>
+              Yüklenen diziler şu anda alınamıyor.
+            </Text>
+          ) : automation?.uploadedSeries.length ? (
+            automation.uploadedSeries.map((item) => (
+              <View
+                key={item.slug}
+                style={[styles.uploadedSeriesRow, { borderTopColor: colors.border }]}
+              >
+                <Text
+                  style={[styles.uploadedSeriesName, { color: colors.foreground }]}
+                  numberOfLines={2}
+                >
+                  {item.title}
+                </Text>
+                <Feather name="check-circle" size={16} color={colors.success} />
+              </View>
+            ))
+          ) : (
+            <Text style={[styles.uploadedSeriesEmpty, { color: colors.mutedForeground }]}>
+              Henüz Cloudflare Stream’e yüklenen dizi yok.
             </Text>
           )}
         </View>
@@ -693,6 +847,62 @@ const styles = StyleSheet.create({
   automationError: {
     fontSize: 12,
     fontFamily: 'Inter_500Medium',
+  },
+  automationControlButton: {
+    minHeight: 44,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 5,
+  },
+  automationControlText: {
+    color: '#fff',
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  uploadedSeriesCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 6,
+    marginBottom: 14,
+  },
+  uploadedSeriesHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingBottom: 8,
+  },
+  uploadedSeriesTitle: {
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+    flex: 1,
+  },
+  uploadedSeriesCount: {
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
+  },
+  uploadedSeriesRow: {
+    minHeight: 42,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 7,
+  },
+  uploadedSeriesName: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'Inter_500Medium',
+  },
+  uploadedSeriesEmpty: {
+    paddingVertical: 10,
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
   },
   header: {
     flexDirection: 'row',

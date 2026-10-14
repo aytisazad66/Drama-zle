@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { URL } from 'url';
+import { pool } from '@workspace/db';
 import { parseMasterM3u8, parseVariantM3u8 } from './hlsUtils';
 
 const router = Router();
@@ -19,14 +20,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function proxyFetchResponse(url: string, accept: string): Promise<Response> {
+async function proxyFetchResponse(
+  url: string,
+  accept: string,
+  signal?: AbortSignal,
+): Promise<Response> {
   let lastError: unknown;
 
   for (let attempt = 0; attempt < MAX_UPSTREAM_ATTEMPTS; attempt++) {
     try {
+      const timeout = AbortSignal.timeout(25_000);
+      const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       const response = await fetch(url, {
         headers: { ...BASE_HEADERS, Accept: accept },
-        signal: AbortSignal.timeout(25_000),
+        signal: requestSignal,
       });
       if (response.ok) return response;
 
@@ -39,6 +46,7 @@ async function proxyFetchResponse(url: string, accept: string): Promise<Response
       if (!retryable || attempt === MAX_UPSTREAM_ATTEMPTS - 1) throw error;
       lastError = error;
     } catch (error) {
+      if (signal?.aborted) throw error;
       if (attempt === MAX_UPSTREAM_ATTEMPTS - 1) throw error;
       lastError = error;
     }
@@ -49,33 +57,38 @@ async function proxyFetchResponse(url: string, accept: string): Promise<Response
   throw lastError instanceof Error ? lastError : new Error('HLS upstream request failed');
 }
 
-async function proxyFetchBuffer(url: string): Promise<Buffer> {
-  const res = await proxyFetchResponse(url, '*/*');
+async function proxyFetchBuffer(url: string, signal?: AbortSignal): Promise<Buffer> {
+  const res = await proxyFetchResponse(url, '*/*', signal);
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function proxyFetchText(url: string): Promise<string> {
-  const res = await proxyFetchResponse(url, '*/*');
+async function proxyFetchText(url: string, signal?: AbortSignal): Promise<string> {
+  const res = await proxyFetchResponse(url, '*/*', signal);
   return res.text();
 }
 
 async function proxyFetchPlaylist(
   url: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; url: string }> {
-  const response = await proxyFetchResponse(url, '*/*');
+  const response = await proxyFetchResponse(url, '*/*', signal);
   return { text: await response.text(), url: response.url || url };
 }
 
 /** Download all HLS segments and concatenate into a single MP4 buffer. */
-async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffer> {
-  const masterPlaylist = await proxyFetchPlaylist(m3u8Url);
+async function assembleHls(
+  m3u8Url: string,
+  qualityIndex: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const masterPlaylist = await proxyFetchPlaylist(m3u8Url, signal);
   const variants = parseMasterM3u8(masterPlaylist.text, masterPlaylist.url);
 
   let variantText = masterPlaylist.text;
   let variantUrl = masterPlaylist.url;
   if (variants.length > 0) {
     const selected = variants[Math.min(qualityIndex, variants.length - 1)]!;
-    const variantPlaylist = await proxyFetchPlaylist(selected.url);
+    const variantPlaylist = await proxyFetchPlaylist(selected.url, signal);
     variantUrl = variantPlaylist.url;
     variantText = variantPlaylist.text;
   } else if (masterPlaylist.text.includes('#EXTINF:')) {
@@ -97,7 +110,7 @@ async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffe
 
   if (initUrl) {
     try {
-      chunks.push(await proxyFetchBuffer(initUrl));
+      chunks.push(await proxyFetchBuffer(initUrl, signal));
     } catch (error) {
       throw new Error(
         `HLS başlangıç segmenti alınamadı: ${safeErrorMessage(error)}`,
@@ -111,7 +124,7 @@ async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffe
     while (nextSegmentIndex < segments.length && !firstError) {
       const index = nextSegmentIndex++;
       try {
-        segmentChunks[index] = await proxyFetchBuffer(segments[index]!);
+        segmentChunks[index] = await proxyFetchBuffer(segments[index]!, signal);
       } catch (error) {
         firstError = new Error(
           `HLS segmenti ${index + 1}/${segments.length} alınamadı: ${safeErrorMessage(error)}`,
@@ -285,6 +298,29 @@ function safeErrorMessage(error: unknown): string {
   return message.replace(/https?:\/\/\S+/g, '[source URL]');
 }
 
+function streamSeriesSlug(name: string): string {
+  const episodeSuffix = /_S[^/]+E\d+$/i;
+  return name.replace(episodeSuffix, '') || name;
+}
+
+async function recordStreamUpload(
+  uid: string,
+  name: string,
+  creator: string | undefined,
+): Promise<void> {
+  const slug = streamSeriesSlug(name);
+  const title = creator?.trim() || slug.replace(/[-_]+/g, ' ').trim() || slug;
+  await pool.query(
+    `INSERT INTO drama_stream_uploads (uid, slug, series_title, video_name)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (uid) DO UPDATE
+       SET slug = EXCLUDED.slug,
+           series_title = EXCLUDED.series_title,
+           video_name = EXCLUDED.video_name`,
+    [uid, slug, title, name],
+  );
+}
+
 /**
  * POST /api/drama/cf-upload
  *
@@ -324,6 +360,12 @@ router.post('/cf-upload', async (req, res) => {
   if (!accountId || !token) {
     return res.status(500).json({ error: 'Cloudflare kimlik bilgileri yapılandırılmamış' });
   }
+
+  const uploadController = new AbortController();
+  const uploadSignal = uploadController.signal;
+  res.on('close', () => {
+    if (!res.writableEnded) uploadController.abort(new Error('Upload client disconnected'));
+  });
 
   // Parse the stream-video proxy URL to extract original params
   let m3u8Url: string = videoUrl;
@@ -375,9 +417,10 @@ router.post('/cf-upload', async (req, res) => {
     let videoBuffer: Buffer;
     try {
       videoBuffer = isHls
-        ? await assembleHls(m3u8Url, qualityIndex)
-        : await proxyFetchBuffer(m3u8Url);
+        ? await assembleHls(m3u8Url, qualityIndex, uploadSignal)
+        : await proxyFetchBuffer(m3u8Url, uploadSignal);
     } catch (err) {
+      if (uploadSignal.aborted) return;
       const details = safeErrorMessage(err);
       req.log.error(
         { error: details, sourceHost },
@@ -399,14 +442,21 @@ router.post('/cf-upload', async (req, res) => {
     formData.append('file', new Blob([videoBytes], { type: 'video/mp4' }), `${name}.mp4`);
     if (creator) formData.append('creator', creator);
 
-    const cfRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      },
-    );
+    let cfRes: Response;
+    try {
+      cfRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+          signal: uploadSignal,
+        },
+      );
+    } catch (err) {
+      if (uploadSignal.aborted) return;
+      throw err;
+    }
 
     if (!cfRes.ok) {
       const errText = await cfRes.text();
@@ -425,20 +475,28 @@ router.post('/cf-upload', async (req, res) => {
       catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
     }
     await maybeUploadCaption(result.uid);
+    await recordStreamUpload(result.uid, name, creator);
     return res.json(result);
   }
 
   // ── MP4: copy-from-URL (CF fetches from our stream-video proxy) ──
   req.log.info({ name }, 'CF upload: copy-from-URL (MP4)');
 
-  const cfRes = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/copy`,
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: videoUrl, meta: { name }, creator: creator ?? '' }),
-    },
-  );
+  let cfRes: Response;
+  try {
+    cfRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/copy`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl, meta: { name }, creator: creator ?? '' }),
+        signal: uploadSignal,
+      },
+    );
+  } catch (err) {
+    if (uploadSignal.aborted) return;
+    throw err;
+  }
 
   if (!cfRes.ok) {
     const errText = await cfRes.text();
@@ -457,6 +515,7 @@ router.post('/cf-upload', async (req, res) => {
     catch (err) { req.log.warn({ err, uid: result.uid }, 'CF meta set failed (non-fatal)'); }
   }
   await maybeUploadCaption(result.uid);
+  await recordStreamUpload(result.uid, name, creator);
   return res.json(result);
 });
 

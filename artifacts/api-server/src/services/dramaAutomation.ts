@@ -8,6 +8,7 @@ const MAX_ATTEMPTS = 5;
 const SCAN_CONCURRENCY = 3;
 const MAX_UPLOAD_CONCURRENCY = 4;
 const WORKER_LOCK_ID = 4_209_261;
+const WORKER_CONTROL_CHANNEL = "drama_automation_control";
 const configuredUploadConcurrency = Number.parseInt(
   process.env.DRAMA_UPLOAD_CONCURRENCY ?? "2",
   10,
@@ -22,6 +23,8 @@ type AutomationPhase =
   | "starting"
   | "scanning"
   | "uploading"
+  | "stopping"
+  | "paused"
   | "idle"
   | "error";
 
@@ -80,9 +83,8 @@ interface QueueItem {
 }
 
 const snapshot: AutomationSnapshot = {
-  enabled: process.env.DRAMA_AUTOMATION_ENABLED === "true",
-  phase:
-    process.env.DRAMA_AUTOMATION_ENABLED === "true" ? "starting" : "disabled",
+  enabled: false,
+  phase: "disabled",
   currentSeriesTitle: null,
   currentSeason: null,
   currentEpisode: null,
@@ -102,6 +104,16 @@ const failedSeriesScans = new Map<
   { title: string; url: string; attempts: number; nextAttemptAt: number }
 >();
 const activeUploads = new Map<number, QueueItem>();
+const activeUploadControllers = new Map<number, AbortController>();
+
+function requestLocalStop(): void {
+  stopped = true;
+  snapshot.enabled = false;
+  snapshot.phase = loopStarted ? "stopping" : "paused";
+  for (const controller of activeUploadControllers.values()) {
+    controller.abort(new Error("Upload stopped by user"));
+  }
+}
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -113,8 +125,10 @@ function localDramaApi(): string {
   return `http://127.0.0.1:${port}/api/drama`;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const timeout = AbortSignal.timeout(30_000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const response = await fetch(url, { signal: requestSignal });
   if (!response.ok) {
     throw new Error(`API returned HTTP ${response.status}`);
   }
@@ -188,7 +202,7 @@ async function forEachConcurrent<T>(
   let nextIndex = 0;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-      while (nextIndex < items.length) {
+      while (nextIndex < items.length && !stopped) {
         const item = items[nextIndex++];
         if (item !== undefined) await callback(item);
       }
@@ -217,6 +231,7 @@ async function scanSeries(series: CatalogPage["items"][number]): Promise<void> {
     if (!slug) throw new Error("Series slug could not be read");
 
     for (const season of seasonList.seasons) {
+      if (stopped) return;
       await queueSeriesSeason(series.title, slug, season.episodeUrl);
       await wait(SOURCE_PAUSE_MS);
     }
@@ -272,6 +287,7 @@ async function findExistingCfVideo(
   token: string,
   name: string,
   episodeKey: string,
+  signal: AbortSignal,
 ): Promise<CloudflareStreamItem | null> {
   const url = new URL(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream`,
@@ -280,7 +296,7 @@ async function findExistingCfVideo(
   url.searchParams.set("per_page", "1000");
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
   });
   if (!response.ok) {
     throw new Error(`Cloudflare duplicate check failed (HTTP ${response.status})`);
@@ -335,6 +351,15 @@ async function markEpisodeDone(
   hlsUrl: string | null,
 ): Promise<void> {
   await pool.query(
+    `INSERT INTO drama_stream_uploads (uid, slug, series_title, video_name)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (uid) DO UPDATE
+       SET slug = EXCLUDED.slug,
+           series_title = EXCLUDED.series_title,
+           video_name = EXCLUDED.video_name`,
+    [uid, item.slug, item.series_title, cfAssetName(item)],
+  );
+  await pool.query(
     `UPDATE drama_automation_episodes
      SET status = 'done', cf_stream_uid = $2, cf_stream_url = $3,
          last_error = NULL, updated_at = NOW()
@@ -343,7 +368,7 @@ async function markEpisodeDone(
   );
 }
 
-async function uploadEpisode(item: QueueItem): Promise<void> {
+async function uploadEpisode(item: QueueItem, signal: AbortSignal): Promise<void> {
   snapshot.phase = "uploading";
 
   const accountId = process.env.CF_ACCOUNT_ID;
@@ -358,6 +383,7 @@ async function uploadEpisode(item: QueueItem): Promise<void> {
     token,
     assetName,
     item.episode_key,
+    signal,
   );
   if (existing) {
     await markEpisodeDone(item, existing.uid, existing.playback?.hls ?? null);
@@ -367,7 +393,7 @@ async function uploadEpisode(item: QueueItem): Promise<void> {
 
   const extractUrl = new URL(`${localDramaApi()}/extract`);
   extractUrl.searchParams.set("url", item.episode_url);
-  const extracted = await getJson<ExtractedEpisodes>(extractUrl.toString());
+  const extracted = await getJson<ExtractedEpisodes>(extractUrl.toString(), signal);
   const episode = extracted.episodes.find(
     (candidate) => candidate.num === item.episode_num,
   );
@@ -377,7 +403,7 @@ async function uploadEpisode(item: QueueItem): Promise<void> {
   embedUrl.searchParams.set("token", episode.token);
   embedUrl.searchParams.set("tokenType", episode.tokenType);
   embedUrl.searchParams.set("episodeUrl", extracted.episodeUrl || item.episode_url);
-  const embed = await getJson<EmbedResponse>(embedUrl.toString());
+  const embed = await getJson<EmbedResponse>(embedUrl.toString(), signal);
   const videoUrl = embed.videoUrl ?? embed.m3u8Url;
   if (!videoUrl) throw new Error("Video stream could not be resolved");
 
@@ -396,7 +422,7 @@ async function uploadEpisode(item: QueueItem): Promise<void> {
       subtitleUrl: embed.subtitleUrl ?? undefined,
       automationKey: item.episode_key,
     }),
-    signal: AbortSignal.timeout(30 * 60 * 1_000),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(30 * 60 * 1_000)]),
   });
   if (!uploadResponse.ok) {
     const data = (await uploadResponse.json().catch(() => ({}))) as {
@@ -415,19 +441,42 @@ async function uploadEpisode(item: QueueItem): Promise<void> {
 }
 
 async function processNextEpisode(): Promise<boolean> {
+  if (stopped) return false;
   const item = await claimNextEpisode();
   if (!item) return false;
+  if (stopped) {
+    await pool.query(
+      `UPDATE drama_automation_episodes
+       SET status = 'pending', next_attempt_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [item.id],
+    );
+    return false;
+  }
 
   activeUploads.set(item.id, item);
+  const controller = new AbortController();
+  activeUploadControllers.set(item.id, controller);
   snapshot.phase = "uploading";
   snapshot.currentSeriesTitle = item.series_title;
   snapshot.currentSeason = item.season;
   snapshot.currentEpisode = item.episode_num;
 
   try {
-    await uploadEpisode(item);
+    await uploadEpisode(item, controller.signal);
     snapshot.lastError = null;
   } catch (error) {
+    if (controller.signal.aborted) {
+      await pool.query(
+        `UPDATE drama_automation_episodes
+         SET status = 'pending', next_attempt_at = NOW(),
+             last_error = NULL, updated_at = NOW()
+         WHERE id = $1`,
+        [item.id],
+      );
+      logger.info({ episodeKey: item.episode_key }, "Episode upload stopped; episode remains queued");
+      return true;
+    }
     const message =
       error instanceof Error ? error.message.replace(/https?:\/\/\S+/g, "[source URL]") : "Upload failed";
     const delayMs = Math.min(60 * 60 * 1_000, 30_000 * 2 ** (item.attempts - 1));
@@ -446,10 +495,12 @@ async function processNextEpisode(): Promise<boolean> {
     );
   } finally {
     activeUploads.delete(item.id);
+    activeUploadControllers.delete(item.id);
     const nextActiveUpload = [...activeUploads.values()].at(-1);
     snapshot.currentSeriesTitle = nextActiveUpload?.series_title ?? null;
     snapshot.currentSeason = nextActiveUpload?.season ?? null;
     snapshot.currentEpisode = nextActiveUpload?.episode_num ?? null;
+    if (stopped && activeUploadControllers.size === 0) snapshot.phase = "stopping";
   }
   return true;
 }
@@ -476,7 +527,7 @@ async function runLoop(): Promise<void> {
     const scanDue =
       (!scanComplete || Date.now() - lastScanCompletedAt >= CATALOG_RESCAN_MS) &&
       Date.now() >= nextScanAttemptAt;
-    if (scanDue) {
+    if (scanDue && !stopped) {
       try {
         await scanOneCatalogPage();
         nextScanAttemptAt = 0;
@@ -490,7 +541,7 @@ async function runLoop(): Promise<void> {
     }
 
     try {
-      didRetryScan = await retryFailedSeriesScans();
+      if (!stopped) didRetryScan = await retryFailedSeriesScans();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Automation worker failed";
       snapshot.lastError = message.replace(/https?:\/\/\S+/g, "[source URL]").slice(0, 240);
@@ -498,7 +549,7 @@ async function runLoop(): Promise<void> {
     }
 
     try {
-      didUpload = await processUploadBatch();
+      if (!stopped) didUpload = await processUploadBatch();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Automation worker failed";
       snapshot.lastError = message.replace(/https?:\/\/\S+/g, "[source URL]").slice(0, 240);
@@ -516,7 +567,17 @@ async function runLoop(): Promise<void> {
 }
 
 export async function startDramaAutomation(): Promise<void> {
-  if (loopStarted || process.env.DRAMA_AUTOMATION_ENABLED !== "true") return;
+  if (loopStarted) {
+    stopped = false;
+    snapshot.enabled = true;
+    if (snapshot.phase === "stopping" || snapshot.phase === "paused") {
+      snapshot.phase = "starting";
+    }
+    return;
+  }
+  if (!process.env.CF_ACCOUNT_ID || !process.env.CF_STREAM_TOKEN) {
+    throw new Error("Cloudflare Stream kimlik bilgileri yapılandırılmamış");
+  }
   stopped = false;
 
   const lockClient = await pool.connect();
@@ -527,12 +588,18 @@ export async function startDramaAutomation(): Promise<void> {
       [WORKER_LOCK_ID],
     );
     if (!lock.rows[0]?.locked) {
-      lockClient.release();
-      snapshot.phase = "idle";
-      logger.info("Drama automation is already running in another API instance");
-      return;
+      throw new Error("Cloudflare Stream yükleme işlemi başka bir sunucuda çalışıyor");
     }
     lockAcquired = true;
+    await lockClient.query(`LISTEN ${WORKER_CONTROL_CHANNEL}`);
+    lockClient.on("notification", (notification) => {
+      if (
+        notification.channel === WORKER_CONTROL_CHANNEL &&
+        notification.payload === "stop"
+      ) {
+        requestLocalStop();
+      }
+    });
 
     await pool.query(
       `UPDATE drama_automation_episodes
@@ -553,7 +620,10 @@ export async function startDramaAutomation(): Promise<void> {
   logger.info("Drama automation worker started");
 
   automationLoop = runLoop().finally(async () => {
-    snapshot.phase = "disabled";
+    snapshot.enabled = false;
+    snapshot.phase = "paused";
+    loopStarted = false;
+    automationLoop = null;
     await lockClient
       .query("SELECT pg_advisory_unlock($1)", [WORKER_LOCK_ID])
       .catch(() => {});
@@ -561,9 +631,11 @@ export async function startDramaAutomation(): Promise<void> {
   });
 }
 
-export async function stopDramaAutomation(): Promise<void> {
-  stopped = true;
-  await automationLoop;
+export async function stopDramaAutomation(waitForActiveUploads = false): Promise<void> {
+  requestLocalStop();
+  await pool.query("SELECT pg_notify($1, $2)", [WORKER_CONTROL_CHANNEL, "stop"]);
+  const loopToStop = automationLoop;
+  if (waitForActiveUploads) await loopToStop;
 }
 
 export async function getDramaAutomationStatus() {
@@ -578,8 +650,51 @@ export async function getDramaAutomationStatus() {
       counts[row.status as keyof typeof counts] = row.count;
     }
   }
+  const workerLockResult = await pool.query<{ held: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM pg_locks
+       WHERE locktype = 'advisory'
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+         AND objid = $1::oid
+         AND objsubid = 1
+         AND granted
+     ) AS held`,
+    [WORKER_LOCK_ID],
+  );
+  const workerLockHeld = workerLockResult.rows[0]?.held ?? false;
+  const statusSnapshot = { ...snapshot };
+  if (!loopStarted && workerLockHeld) {
+    statusSnapshot.enabled = true;
+    statusSnapshot.phase = "idle";
+  } else if (!loopStarted && !workerLockHeld && statusSnapshot.phase === "idle") {
+    statusSnapshot.enabled = false;
+    statusSnapshot.phase = stopped ? "paused" : "disabled";
+  }
+  const seriesResult = await pool.query<{
+    slug: string;
+    title: string;
+    lastUploadedAt: Date;
+  }>(
+    `SELECT slug, MIN(series_title) AS title,
+            MAX(uploaded_at) AS "lastUploadedAt"
+     FROM (
+       SELECT slug, series_title, updated_at AS uploaded_at
+       FROM drama_automation_episodes
+       WHERE status = 'done' AND cf_stream_uid IS NOT NULL
+       UNION ALL
+       SELECT slug, series_title, uploaded_at
+       FROM drama_stream_uploads
+     ) AS stream_uploads
+     GROUP BY slug
+     ORDER BY "lastUploadedAt" DESC, title ASC`,
+  );
   return {
-    ...snapshot,
+    ...statusSnapshot,
     ...counts,
+    uploadedSeries: seriesResult.rows.map((series) => ({
+      ...series,
+      lastUploadedAt: series.lastUploadedAt.toISOString(),
+    })),
   };
 }

@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "bash"]
+modules = ["nodejs-20", "web", "bash", "postgresql-16"]
 
 [deployment]
 router = "application"
@@ -43,4 +43,3 @@ channel = "stable-25_05"
 
 [userenv.shared]
 CF_ACCOUNT_ID = "5886a653a34c3c8e8b91d9d09dbce6f1"
-DRAMA_AUTOMATION_ENABLED = "true"

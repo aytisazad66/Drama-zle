@@ -6,11 +6,15 @@
  * OpenAPI spec version: 0.1.0
  */
 import {
+  useMutation,
   useQuery
 } from '@tanstack/react-query';
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult
 } from '@tanstack/react-query';
@@ -230,8 +234,8 @@ export const getGetDramaAutomationStatusUrl = () => {
 }
 
 /**
- * Returns server-side catalog scanning and Cloudflare upload progress.
- * @summary Get automatic upload progress
+ * Returns manual catalog scanning and upload progress, plus series already uploaded.
+ * @summary Get Cloudflare Stream upload status
  */
 export const getDramaAutomationStatus = async ( options?: RequestInit): Promise<DramaAutomationStatus> => {
 
@@ -278,7 +282,7 @@ export type GetDramaAutomationStatusQueryError = ErrorType<ErrorResponse>
 
 
 /**
- * @summary Get automatic upload progress
+ * @summary Get Cloudflare Stream upload status
  */
 
 export function useGetDramaAutomationStatus<TData = Awaited<ReturnType<typeof getDramaAutomationStatus>>, TError = ErrorType<ErrorResponse>>(
@@ -298,6 +302,149 @@ export function useGetDramaAutomationStatus<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+export const getStartDramaAutomationUrl = () => {
+
+
+
+
+  return `/api/drama/automation/start`
+}
+
+/**
+ * @summary Start background Cloudflare Stream uploads
+ */
+export const startDramaAutomation = async ( options?: RequestInit): Promise<DramaAutomationStatus> => {
+
+  return customFetch<DramaAutomationStatus>(getStartDramaAutomationUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getStartDramaAutomationMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof startDramaAutomation>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof startDramaAutomation>>, TError,void, TContext> => {
+
+const mutationKey = ['startDramaAutomation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof startDramaAutomation>>, void> = () => {
+
+
+          return  startDramaAutomation(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type StartDramaAutomationMutationResult = NonNullable<Awaited<ReturnType<typeof startDramaAutomation>>>
+
+    export type StartDramaAutomationMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Start background Cloudflare Stream uploads
+ */
+export const useStartDramaAutomation = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof startDramaAutomation>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof startDramaAutomation>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getStartDramaAutomationMutationOptions(options));
+    }
+
+export const getStopDramaAutomationUrl = () => {
+
+
+
+
+  return `/api/drama/automation/stop`
+}
+
+/**
+ * Stops new work and cancels active uploads; interrupted episodes remain retryable.
+ * @summary Stop background Cloudflare Stream uploads
+ */
+export const stopDramaAutomation = async ( options?: RequestInit): Promise<DramaAutomationStatus> => {
+
+  return customFetch<DramaAutomationStatus>(getStopDramaAutomationUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getStopDramaAutomationMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopDramaAutomation>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof stopDramaAutomation>>, TError,void, TContext> => {
+
+const mutationKey = ['stopDramaAutomation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof stopDramaAutomation>>, void> = () => {
+
+
+          return  stopDramaAutomation(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type StopDramaAutomationMutationResult = NonNullable<Awaited<ReturnType<typeof stopDramaAutomation>>>
+
+    export type StopDramaAutomationMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Stop background Cloudflare Stream uploads
+ */
+export const useStopDramaAutomation = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof stopDramaAutomation>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof stopDramaAutomation>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getStopDramaAutomationMutationOptions(options));
+    }
 
 export const getHealthCheckUrl = () => {
 

@@ -12,7 +12,8 @@ Expo mobile app and Express API for browsing drama episodes, downloading them to
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - Required environment: `DATABASE_URL`, `CF_ACCOUNT_ID`, `CF_STREAM_TOKEN`
-- Set `DRAMA_AUTOMATION_ENABLED=true` to run the catalog scanner and upload queue in the API background worker.
+- Start and stop catalog scanning and Cloudflare Stream uploads from the `Yüklemeyi Başlat` / `Yüklemeyi Durdur` controls in the app. The worker stays stopped when the API server restarts until the user starts it again.
+- Stopping cancels active worker uploads and returns interrupted episodes to the retryable queue.
 - `DRAMA_UPLOAD_CONCURRENCY` controls simultaneous episode uploads (default `2`, capped at `4`); HLS segments are fetched in batches of six.
 - The scanner queues expected episode numbers even when a player token is temporarily missing; those episodes retry with backoff.
 - `GET /api/drama/automation/status` reports scanning state, queue totals, and the last error.
@@ -36,7 +37,7 @@ Expo mobile app and Express API for browsing drama episodes, downloading them to
 
 ## Architecture decisions
 
-- Automation is enabled in this Replit environment and begins scanning when the API server starts.
+- Background catalog scanning and uploads do not start automatically; the user controls them from the app.
 - The worker stores its queue in PostgreSQL and uses an advisory lock so multiple API instances do not process the same queue concurrently.
 - Generated Zod output targets Zod 3; the Orval config pins that generator version to match the workspace dependency.
 
