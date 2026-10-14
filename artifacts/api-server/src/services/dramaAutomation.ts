@@ -5,7 +5,17 @@ const POLL_INTERVAL_MS = 8_000;
 const CATALOG_RESCAN_MS = 6 * 60 * 60 * 1_000;
 const SOURCE_PAUSE_MS = 350;
 const MAX_ATTEMPTS = 5;
+const SCAN_CONCURRENCY = 3;
+const MAX_UPLOAD_CONCURRENCY = 4;
 const WORKER_LOCK_ID = 4_209_261;
+const configuredUploadConcurrency = Number.parseInt(
+  process.env.DRAMA_UPLOAD_CONCURRENCY ?? "2",
+  10,
+);
+const UPLOAD_CONCURRENCY =
+  Number.isInteger(configuredUploadConcurrency) && configuredUploadConcurrency > 0
+    ? Math.min(configuredUploadConcurrency, MAX_UPLOAD_CONCURRENCY)
+    : 2;
 
 type AutomationPhase =
   | "disabled"
@@ -40,6 +50,8 @@ interface ExtractedEpisodes {
   slug: string;
   season: string;
   episodes: { num: number; token: string; tokenType: string }[];
+  totalEpisodes: number;
+  missingEpisodeNums: number[];
   episodeUrl: string;
 }
 
@@ -83,6 +95,12 @@ let loopStarted = false;
 let scanPage = 1;
 let scanComplete = false;
 let lastScanCompletedAt = 0;
+let nextScanAttemptAt = 0;
+const failedSeriesScans = new Map<
+  string,
+  { title: string; url: string; attempts: number; nextAttemptAt: number }
+>();
+const activeUploads = new Map<number, QueueItem>();
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -118,36 +136,119 @@ async function queueSeriesSeason(
   const extracted = await getJson<ExtractedEpisodes>(extractUrl.toString());
   const season = extracted.season || "1";
   const episodeUrl = extracted.episodeUrl || seasonUrl;
+  const episodeNums = new Set(extracted.episodes.map((episode) => episode.num));
+  for (let episodeNum = 1; episodeNum <= extracted.totalEpisodes; episodeNum += 1) {
+    episodeNums.add(episodeNum);
+  }
+  const sortedEpisodeNums = [...episodeNums].sort((a, b) => a - b);
 
-  for (const episode of extracted.episodes) {
-    const episodeKey =
-      `${seriesSlug}:s${season}:e${episode.num}`.toLocaleLowerCase("en-US");
-    await pool.query(
-      `INSERT INTO drama_automation_episodes
-        (episode_key, slug, series_title, season, episode_num, episode_url)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (episode_key) DO NOTHING`,
-      [episodeKey, seriesSlug, title || extracted.title, season, episode.num, episodeUrl],
+  if (extracted.missingEpisodeNums.length > 0) {
+    logger.warn(
+      {
+        slug: seriesSlug,
+        season,
+        missingEpisodeNums: extracted.missingEpisodeNums,
+      },
+      "Source page is missing episode players; retryable queue entries will be created",
     );
   }
+
+  if (sortedEpisodeNums.length === 0) return;
+  const values: unknown[] = [];
+  const placeholders = sortedEpisodeNums.map((episodeNum, index) => {
+    const episodeKey =
+      `${seriesSlug}:s${season}:e${episodeNum}`.toLocaleLowerCase("en-US");
+    const offset = index * 6;
+    values.push(
+      episodeKey,
+      seriesSlug,
+      title || extracted.title,
+      season,
+      episodeNum,
+      episodeUrl,
+    );
+    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`;
+  });
+
+  await pool.query(
+    `INSERT INTO drama_automation_episodes
+      (episode_key, slug, series_title, season, episode_num, episode_url)
+     VALUES ${placeholders.join(", ")}
+     ON CONFLICT (episode_key) DO NOTHING`,
+    values,
+  );
 }
 
-async function scanOneCatalogPage(): Promise<void> {
-  snapshot.phase = "scanning";
-  const catalog = await fetchCatalogPage(scanPage);
+async function forEachConcurrent<T>(
+  items: T[],
+  concurrency: number,
+  callback: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const item = items[nextIndex++];
+        if (item !== undefined) await callback(item);
+      }
+    }),
+  );
+}
 
-  for (const series of catalog.items) {
+function recordSeriesScanFailure(series: CatalogPage["items"][number]): void {
+  const previous = failedSeriesScans.get(series.url);
+  const attempts = (previous?.attempts ?? 0) + 1;
+  const delayMs = Math.min(15 * 60 * 1_000, 30_000 * 2 ** (attempts - 1));
+  failedSeriesScans.set(series.url, {
+    title: series.title,
+    url: series.url,
+    attempts,
+    nextAttemptAt: Date.now() + delayMs,
+  });
+}
+
+async function scanSeries(series: CatalogPage["items"][number]): Promise<void> {
+  try {
     const seasonsUrl = new URL(`${localDramaApi()}/seasons`);
     seasonsUrl.searchParams.set("url", series.url);
     const seasonList = await getJson<SeasonList>(seasonsUrl.toString());
     const slug = new URL(series.url).pathname.split("/").filter(Boolean).at(-1);
-    if (!slug) continue;
+    if (!slug) throw new Error("Series slug could not be read");
 
     for (const season of seasonList.seasons) {
       await queueSeriesSeason(series.title, slug, season.episodeUrl);
       await wait(SOURCE_PAUSE_MS);
     }
+    failedSeriesScans.delete(series.url);
+  } catch (error) {
+    recordSeriesScanFailure(series);
+    logger.warn(
+      {
+        seriesUrl: series.url.replace(/https?:\/\/\S+/g, "[source URL]"),
+        error: error instanceof Error ? error.message.replace(/https?:\/\/\S+/g, "[source URL]") : "Series scan failed",
+        retryInMs: failedSeriesScans.get(series.url)?.nextAttemptAt! - Date.now(),
+      },
+      "Series scan failed; it will be retried",
+    );
   }
+}
+
+async function retryFailedSeriesScans(): Promise<boolean> {
+  const dueSeries = [...failedSeriesScans.values()]
+    .filter((series) => series.nextAttemptAt <= Date.now())
+    .slice(0, SCAN_CONCURRENCY);
+  if (dueSeries.length === 0) return false;
+
+  await forEachConcurrent(dueSeries, SCAN_CONCURRENCY, async (series) => {
+    await scanSeries(series);
+  });
+  return true;
+}
+
+async function scanOneCatalogPage(): Promise<void> {
+  snapshot.phase = "scanning";
+  const catalog = await fetchCatalogPage(scanPage);
+  await forEachConcurrent(catalog.items, SCAN_CONCURRENCY, scanSeries);
 
   if (catalog.hasMore && scanPage < 500) {
     scanPage += 1;
@@ -243,9 +344,6 @@ async function markEpisodeDone(
 
 async function uploadEpisode(item: QueueItem): Promise<void> {
   snapshot.phase = "uploading";
-  snapshot.currentSeriesTitle = item.series_title;
-  snapshot.currentSeason = item.season;
-  snapshot.currentEpisode = item.episode_num;
 
   const accountId = process.env.CF_ACCOUNT_ID;
   const token = process.env.CF_STREAM_TOKEN;
@@ -319,6 +417,12 @@ async function processNextEpisode(): Promise<boolean> {
   const item = await claimNextEpisode();
   if (!item) return false;
 
+  activeUploads.set(item.id, item);
+  snapshot.phase = "uploading";
+  snapshot.currentSeriesTitle = item.series_title;
+  snapshot.currentSeason = item.season;
+  snapshot.currentEpisode = item.episode_num;
+
   try {
     await uploadEpisode(item);
     snapshot.lastError = null;
@@ -340,30 +444,72 @@ async function processNextEpisode(): Promise<boolean> {
       "Automatic episode upload failed",
     );
   } finally {
-    snapshot.currentSeriesTitle = null;
-    snapshot.currentSeason = null;
-    snapshot.currentEpisode = null;
+    activeUploads.delete(item.id);
+    const nextActiveUpload = [...activeUploads.values()].at(-1);
+    snapshot.currentSeriesTitle = nextActiveUpload?.series_title ?? null;
+    snapshot.currentSeason = nextActiveUpload?.season ?? null;
+    snapshot.currentEpisode = nextActiveUpload?.episode_num ?? null;
   }
   return true;
 }
 
+async function processUploadBatch(): Promise<boolean> {
+  const results = await Promise.allSettled(
+    Array.from({ length: UPLOAD_CONCURRENCY }, () => processNextEpisode()),
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
+  return results.some(
+    (result) => result.status === "fulfilled" && result.value,
+  );
+}
+
 async function runLoop(): Promise<void> {
   while (!stopped) {
-    try {
-      const scanDue =
-        !scanComplete || Date.now() - lastScanCompletedAt >= CATALOG_RESCAN_MS;
-      if (scanDue) await scanOneCatalogPage();
+    let didScan = false;
+    let didUpload = false;
+    let didRetryScan = false;
 
-      const didUpload = await processNextEpisode();
-      if (!didUpload && scanComplete) snapshot.phase = "idle";
-      if (!didUpload) await wait(POLL_INTERVAL_MS);
-      else await wait(POLL_INTERVAL_MS);
+    const scanDue =
+      (!scanComplete || Date.now() - lastScanCompletedAt >= CATALOG_RESCAN_MS) &&
+      Date.now() >= nextScanAttemptAt;
+    if (scanDue) {
+      try {
+        await scanOneCatalogPage();
+        nextScanAttemptAt = 0;
+        didScan = true;
+      } catch (error) {
+        nextScanAttemptAt = Date.now() + 60_000;
+        const message = error instanceof Error ? error.message : "Catalog scan failed";
+        snapshot.lastError = message.replace(/https?:\/\/\S+/g, "[source URL]").slice(0, 240);
+        logger.error({ message: snapshot.lastError }, "Drama catalog page scan failed; uploads will continue");
+      }
+    }
+
+    try {
+      didRetryScan = await retryFailedSeriesScans();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Automation worker failed";
-      snapshot.phase = "error";
       snapshot.lastError = message.replace(/https?:\/\/\S+/g, "[source URL]").slice(0, 240);
-      logger.error({ message: snapshot.lastError }, "Drama automation loop failed");
-      await wait(60_000);
+      logger.error({ message: snapshot.lastError }, "Drama series retry failed");
+    }
+
+    try {
+      didUpload = await processUploadBatch();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Automation worker failed";
+      snapshot.lastError = message.replace(/https?:\/\/\S+/g, "[source URL]").slice(0, 240);
+      logger.error({ message: snapshot.lastError }, "Drama upload batch failed");
+    }
+
+    if (!didScan && !didUpload && !didRetryScan) {
+      if (scanComplete && activeUploads.size === 0) snapshot.phase = "idle";
+      const scanWait = nextScanAttemptAt > Date.now()
+        ? Math.min(POLL_INTERVAL_MS, nextScanAttemptAt - Date.now())
+        : POLL_INTERVAL_MS;
+      await wait(scanWait);
     }
   }
 }

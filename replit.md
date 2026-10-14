@@ -13,6 +13,8 @@ Expo mobile app and Express API for browsing drama episodes, downloading them to
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - Required environment: `DATABASE_URL`, `CF_ACCOUNT_ID`, `CF_STREAM_TOKEN`
 - Set `DRAMA_AUTOMATION_ENABLED=true` to run the catalog scanner and upload queue in the API background worker.
+- `DRAMA_UPLOAD_CONCURRENCY` controls simultaneous episode uploads (default `2`, capped at `4`); HLS segments are fetched in batches of six.
+- The scanner queues expected episode numbers even when a player token is temporarily missing; those episodes retry with backoff.
 - `GET /api/drama/automation/status` reports scanning state, queue totals, and the last error.
 
 ## Stack

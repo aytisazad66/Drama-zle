@@ -5,6 +5,7 @@ import {
 } from "@workspace/api-zod";
 import type { DramaCatalogPage } from "@workspace/api-zod";
 import { parseMasterM3u8, parseVariantM3u8 } from "./hlsUtils";
+import { mapEpisodeTokens } from "../lib/episodeTokens";
 
 const router = Router();
 const DRAMA_ORIGIN = "https://dramadizilerim.com";
@@ -467,22 +468,15 @@ router.get("/extract", async (req: Request, res: Response) => {
     const tokens = ctQueryStrings.length > 0 ? ctQueryStrings : dataTokens;
     const tokenType = ctQueryStrings.length > 0 ? "ct" : "token";
 
-    // Count total episodes from data-epid markers
+    // Count all listed episodes, including players whose token is temporarily missing.
     const epIdCount = (html.match(/data-epid="[^"]+"/g) ?? []).length;
-    const totalEpisodes = Math.max(tokens.length, epIdCount);
-
-    const episodes = tokens.map((token, i) => ({
-      num: i + 1,
-      token,
-      tokenType,
-    }));
+    const mappedEpisodes = mapEpisodeTokens(tokens, tokenType, epIdCount);
 
     res.json({
       title,
       slug,
       season,
-      totalEpisodes,
-      episodes,
+      ...mappedEpisodes,
       episodeUrl: pageUrl.toString(),
     });
   } catch (err) {

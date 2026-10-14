@@ -13,6 +13,7 @@ const BASE_HEADERS = {
 };
 
 const MAX_UPSTREAM_ATTEMPTS = 3;
+const HLS_SEGMENT_CONCURRENCY = 6;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -103,15 +104,30 @@ async function assembleHls(m3u8Url: string, qualityIndex: number): Promise<Buffe
       );
     }
   }
-  for (let index = 0; index < segments.length; index++) {
-    try {
-      chunks.push(await proxyFetchBuffer(segments[index]!));
-    } catch (error) {
-      throw new Error(
-        `HLS segmenti ${index + 1}/${segments.length} alınamadı: ${safeErrorMessage(error)}`,
-      );
+  const segmentChunks = new Array<Buffer>(segments.length);
+  let nextSegmentIndex = 0;
+  let firstError: Error | null = null;
+  const fetchSegments = async () => {
+    while (nextSegmentIndex < segments.length && !firstError) {
+      const index = nextSegmentIndex++;
+      try {
+        segmentChunks[index] = await proxyFetchBuffer(segments[index]!);
+      } catch (error) {
+        firstError = new Error(
+          `HLS segmenti ${index + 1}/${segments.length} alınamadı: ${safeErrorMessage(error)}`,
+        );
+      }
     }
-  }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(HLS_SEGMENT_CONCURRENCY, segments.length) },
+      () => fetchSegments(),
+    ),
+  );
+  if (firstError) throw firstError;
+  for (const chunk of segmentChunks) chunks.push(chunk);
 
   if (chunks.length === 0) throw new Error('Hiç HLS segmenti indirilemedi');
   return Buffer.concat(chunks);
