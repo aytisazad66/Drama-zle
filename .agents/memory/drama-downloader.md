@@ -70,3 +70,11 @@ The user wants automated Cloudflare Stream uploads to start only when they press
 **Why:** The user explicitly requested manual control and a recorded series-name list.
 
 **How to apply:** Do not auto-start the upload worker; preserve retryable episodes when stopping, and include successful uploads in the visible series history.
+
+## Cloudflare Stream list responses
+
+The live Stream list API may return videos under `result.videos` with a `result.total`, even though reference examples show `result` as an array.
+
+**Why:** Treating the nested response as an empty array would hide real videos and make bulk actions unsafe.
+
+**How to apply:** Inspect the live response shape and verify a complete unique-ID inventory against the reported total before any bulk mutation.
