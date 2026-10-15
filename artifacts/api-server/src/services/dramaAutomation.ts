@@ -1,5 +1,6 @@
 import { pool } from "@workspace/db";
 import { logger } from "../lib/logger";
+import { isTurkishSeriesTitle } from "./turkishSeriesTitle";
 
 const POLL_INTERVAL_MS = 8_000;
 const CATALOG_RESCAN_MS = 6 * 60 * 60 * 1_000;
@@ -223,6 +224,15 @@ function recordSeriesScanFailure(series: CatalogPage["items"][number]): void {
 }
 
 async function scanSeries(series: CatalogPage["items"][number]): Promise<void> {
+  if (!isTurkishSeriesTitle(series.title)) {
+    failedSeriesScans.delete(series.url);
+    logger.info(
+      { seriesUrl: series.url.replace(/https?:\/\/\S+/g, "[source URL]") },
+      "Series skipped because its title is not confidently Turkish",
+    );
+    return;
+  }
+
   try {
     const seasonsUrl = new URL(`${localDramaApi()}/seasons`);
     seasonsUrl.searchParams.set("url", series.url);
@@ -452,6 +462,19 @@ async function processNextEpisode(): Promise<boolean> {
       [item.id],
     );
     return false;
+  }
+
+  if (!isTurkishSeriesTitle(item.series_title)) {
+    await pool.query(
+      `DELETE FROM drama_automation_episodes
+       WHERE id = $1 AND status = 'processing'`,
+      [item.id],
+    );
+    logger.info(
+      { slug: item.slug },
+      "Queued series skipped because its title is not confidently Turkish",
+    );
+    return true;
   }
 
   activeUploads.set(item.id, item);
